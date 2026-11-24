@@ -43,7 +43,14 @@ def _record_sample(samples, name, value, lifetime_max):
     lifetime_max[name]=max(value,lifetime_max.get(name,value))
 
 
-def _service_timer_before_cv(engine,capture,sequence,*,mouse,output,cv_budget,stop_at=None):
+def _cv_budget_seconds(active_cv_ms, *, windows_capture):
+    recent = sorted(list(active_cv_ms)[-32:])
+    measured = recent[int(.95 * len(recent))] / 1000 + .001 if recent else .004
+    return min(.060 if windows_capture else .012, max(.004, measured))
+
+
+def _service_timer_before_cv(engine,capture,sequence,*,mouse,output,cv_budget,stop_at=None,
+                             dxgi_frame=None):
     """Reserve the last CV-sized slice for a pending, still validated timer.
 
     Publication retries read only status, never pixels. Every dispatch attempt
@@ -51,17 +58,24 @@ def _service_timer_before_cv(engine,capture,sequence,*,mouse,output,cv_budget,st
     """
     plan=engine.planner.current
     now=time.monotonic()
-    if plan is None or plan.press_at-now>cv_budget:
+    if (plan is None or plan.press_at-now>cv_budget
+            or plan.press_at>plan.valid_until):
         return False
     deadline=min(plan.valid_until,now+cv_budget+.001)
+    if dxgi_frame is not None and plan.timing_mode=='PREDICTED':
+        deadline=min(deadline,max(now,plan.press_at)+.005,plan.latest_press_at)
     if stop_at is not None:
         deadline=min(deadline,stop_at)
     while now<=deadline:
         remaining=plan.press_at-now
         if remaining<=0:
-            dispatch(engine,capture,sequence,mouse=mouse,output=output,clock=time.monotonic)
+            dispatch(engine,capture,sequence,mouse=mouse,output=output,clock=time.monotonic,
+                     same_source_as=dxgi_frame)
             if (engine.planner.current is not plan or engine.reason!='CAPTURE_WRITING'):
                 return True
+            if dxgi_frame is not None:
+                # The DXGI reader is a Python thread and needs to publish too.
+                time.sleep(0)
             now=time.monotonic()
             remaining=.0002
         if now>=deadline:
@@ -288,11 +302,10 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                     elif frame.media_time is None:
                         engine.cancel('NO_MEDIA_TIMESTAMP',time.monotonic())
                     else:
-                        recent_cv=sorted(list(active_cv_ms)[-32:])
-                        cv_budget=min(.012,max(.004,
-                            (recent_cv[int(.95*len(recent_cv))]/1000+.001) if recent_cv else .004))
+                        cv_budget=_cv_budget_seconds(active_cv_ms,windows_capture=windows_capture)
                         if _service_timer_before_cv(engine,capture,last,mouse=mouse,output=output,
-                                cv_budget=cv_budget,stop_at=until):
+                                cv_budget=cv_budget,stop_at=until,
+                                dxgi_frame=frame if windows_capture else None):
                             deadline_cv_deferrals+=1
                             events()
                         cv_started=time.perf_counter()

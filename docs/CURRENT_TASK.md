@@ -36,11 +36,17 @@
   invocation, but the tester saw no game response. That attempt also logged
   `GREAT_PASSED`. Neither the cause of the missing response nor the live grade
   was established.
-- Beta 3 uses Win32 scan code 0x39 for both Space edges and holds it for 80 ms
-  to cover longer input polling intervals. An overlapping attempt is disarmed
-  and the scheduled release stays in place. Roblox acceptance and weak-PC
-  performance remain open.
-- Windows distribution uses the `v0.1.0-beta.3` release and its portable ZIP.
+- Beta 3 uses Win32 scan code 0x39 and holds Space for 80 ms. The tester
+  confirmed the game reacts to input. The report contains nine keydowns, four
+  last-chance attempts and a 52.4 ms active CV p95. Exact in-game grades remain
+  unverified.
+- Beta 4 uses the recent CV p95 to reserve up to 60 ms before a Windows
+  deadline. A newer complete DXGI frame of the same epoch and generation can
+  validate a due prediction within its existing window. Source freshness,
+  publication and LMB are checked before dispatch. A fake-clock regression
+  models the old 12 ms limit missing a deadline 25 ms away. Live beta 4
+  accuracy still needs verification.
+- Windows distribution uses the `v0.1.0-beta.4` release and its portable ZIP.
   `tools/build_windows_release.py` bundles pinned Windows wheels, embedded
   CPython and the built DXGI worker. `vd.cmd` runs the CLI with bundled Python.
   README includes a PowerShell download with SHA-256 verification.

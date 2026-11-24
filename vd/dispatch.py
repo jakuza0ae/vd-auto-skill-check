@@ -11,7 +11,8 @@ import time
 from .input_state import InputDisarmed
 
 
-def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.monotonic):
+def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.monotonic,
+             same_source_as=None):
     if output is not None and mouse is None:
         raise ValueError('Physical input requires a mouse monitor')
     with capture.cv:
@@ -21,7 +22,17 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
             return None
         frame=capture.latest
         prediction_current=getattr(capture,'prediction_current',None)
-        if frame is None or frame.sequence!=sequence:
+        plan=engine.planner.current
+        # A validated DXGI timer may outlive the publication of its frame.
+        # New pixels only confirm the capture source, never change the plan.
+        same_source_timer=(same_source_as is not None and frame is not None
+            and frame.sequence>sequence and same_source_as.sequence==sequence
+            and same_source_as.source_epoch is not None
+            and (frame.source_epoch,frame.source_generation)==
+                (same_source_as.source_epoch,same_source_as.source_generation)
+            and plan is not None and plan.timing_mode=='PREDICTED'
+            and plan.press_at<=now<=min(plan.valid_until,plan.latest_press_at))
+        if frame is None or (frame.sequence!=sequence and not same_source_timer):
             if engine.planner.current is not None and now>engine.planner.current.valid_until:
                 engine.planner.invalidate('OBSERVATION_EXPIRED')
             engine.reason='NEW_FRAME_PENDING'
@@ -34,7 +45,8 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
             return False
         if not prediction_ready():
             return None
-        if output is not None and frame.synthetic:
+        if output is not None and (frame.synthetic or
+                                   (same_source_timer and same_source_as.synthetic)):
             engine.cancel('SYNTHETIC_INPUT_FORBIDDEN',now)
             raise ValueError('Physical input is forbidden for synthetic capture')
         if frame.media_time is None or not -.002<=now-frame.media_time<=engine.planner.max_age:
@@ -49,7 +61,10 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
             held=state.held if state is not None else True
             if not prediction_ready():
                 return None
-            plan=engine.poll(clock(),held=held,capture_alive=True)
+            claim_at=clock()
+            if same_source_timer and claim_at>min(plan.valid_until,plan.latest_press_at):
+                return None
+            plan=engine.poll(claim_at,held=held,capture_alive=True)
             if plan is None:
                 return None
             if output is not None:
@@ -63,16 +78,19 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
                     engine.emit('INPUT_FAILED',clock(),error=str(exc),plan=asdict(plan))
                     engine.cancel('INPUT_FAILED',clock())
                     raise
+                frame_at=frame.media_time
+                if same_source_timer and engine.last_timestamp is not None:
+                    frame_at=engine.last_timestamp
                 engine.emit('KEYDOWN',keydown.syn_completed_at,
                     requested_at=keydown.requested_at,plan=asdict(plan),
-                    frame_at=frame.media_time,
+                    frame_at=frame_at,
                     prefire_motion=asdict(engine.motion.estimate) if engine.motion.estimate else None,
                     motion_diagnostics=dict(
                         reason=engine.motion.reason,
                         samples=len(engine.motion.points),
                         last_observed_motion_at=engine.motion.last_observed_motion_at,
                         check_age_ms=(None if engine.started_at is None else
-                                      (frame.media_time-engine.started_at)*1000)),
+                                      (frame_at-engine.started_at)*1000)),
                     great=asdict(engine.planner.target),
                     good=asdict(engine.good) if engine.good else None,
                     dispatch_lag_ms=(keydown.syn_completed_at-plan.intended_press_at)*1000,

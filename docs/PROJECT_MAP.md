@@ -45,9 +45,10 @@ unverified and are not needed to inspect this solver. Nothing was installed.
   source identity and LMB checks before `vd/input.py` (Linux) or
   `vd/windows_input.py` sends Space.
 - The runtime reserves a measured CV-sized slice before a pending deadline
-  (4–12 ms) for dispatch. Busy publication gets bounded status retries. Completed
-  CV still updates the forecast before the next dispatch; input has no second
-  competing worker thread.
+  (4–12 ms on Linux, 4–60 ms on Windows). An existing DXGI prediction can use
+  a newer complete frame from the same source to verify capture health while
+  retaining the original plan. Busy publication gets bounded status retries.
+  The runtime still owns the only input dispatch path.
 
 ## Evidence, persistence and decisions
 

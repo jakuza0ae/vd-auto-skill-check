@@ -185,6 +185,8 @@ class WindowsCapture:
                         pass
                     return
                 header = _read_exact(self.proc.stdout, _FRAME_HEADER.size)
+                with self.cv:
+                    self._pending_frame = True
                 (magic, version, sequence, present_ns, copy_ns, monitor,
                  width, height, roi_width, roi_height, roi_x, roi_y,
                  source_x, source_y) = _FRAME_HEADER.unpack(header)
@@ -202,7 +204,6 @@ class WindowsCapture:
                 with self.cv:
                     if self._region is not None and region != self._region:
                         raise ValueError('Windows capture display geometry changed. Restart capture.')
-                    self._pending_frame = True
 
                 pixels = _read_exact(self.proc.stdout, size)
                 received_ns = time.monotonic_ns()
@@ -235,6 +236,8 @@ class WindowsCapture:
         except Exception as exc:
             # Let the sibling pipe drain terminal diagnostics before reporting EOF.
             if isinstance(exc, EOFError):
+                with self.cv:
+                    self.latest = None
                 self._logs.join(timeout=.1)
             with self.cv:
                 if not self.stopping:

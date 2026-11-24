@@ -107,6 +107,89 @@ def test_cv_is_not_deferred_for_a_distant_target(monkeypatch):
     assert not runtime._service_timer_before_cv(engine,None,1,mouse=None,output=None,cv_budget=.008)
 
 
+def test_dxgi_pre_cv_budget_reserves_time_for_measured_slow_frames():
+    samples = [8.0, 15.83, 52.378]
+    assert runtime._cv_budget_seconds(samples, windows_capture=True) == pytest.approx(.053378)
+    assert runtime._cv_budget_seconds(samples, windows_capture=False) == pytest.approx(.012)
+
+
+@pytest.mark.parametrize('source_state', [
+    'same_source', 'changed_epoch', 'changed_generation', 'stale', 'released',
+    'at_latest_press', 'after_latest_press', 'busy_then_ready',
+])
+def test_dxgi_timer_with_slow_cv_and_newer_capture(monkeypatch, source_state):
+    clock = SimpleNamespace(now=1.0)
+    anchor = SimpleNamespace(sequence=1, media_time=1.0, synthetic=False,
+                             source_epoch=(41, 1), source_generation=1)
+    newer = SimpleNamespace(sequence=2, media_time=1.017, synthetic=False,
+                            source_epoch=(41, 1), source_generation=1)
+    if source_state == 'changed_epoch':
+        newer.source_epoch = (42, 1)
+    elif source_state == 'changed_generation':
+        newer.source_generation = 2
+    elif source_state == 'stale':
+        newer.media_time = .9
+    capture = SimpleNamespace(cv=threading.Condition(), stopping=False, error=None,
+                              proc=SimpleNamespace(poll=lambda: None), latest=anchor)
+    waits = []
+    capture.prediction_busy = lambda: source_state == 'busy_then_ready' and clock.now < 1.026
+    capture.prediction_current = lambda frame: frame is capture.latest and not capture.prediction_busy()
+
+    def monotonic():
+        clock.now += .000001
+        if clock.now >= 1.017:
+            capture.latest = newer
+        return clock.now
+
+    def sleep(seconds):
+        assert seconds >= 0
+        waits.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(runtime, 'time', SimpleNamespace(monotonic=monotonic, sleep=sleep))
+    engine = Engine(lead_seconds=0, lead_uncertainty=0)
+    engine.target = Arc(40, 10)
+    engine.center = (160, 160)
+    engine.active = True
+    engine.last_timestamp = anchor.media_time
+    engine.planner.begin(engine.target, 22.5)
+    engine.motion.estimate = Motion(1.0, 22.5, 900, .1, 2, 1.0, 12)
+    plan = engine.planner.update(engine.motion.estimate, frame_at=1.0, now=1.0)
+    assert plan.press_at == pytest.approx(1.025)
+    def snapshot():
+        if source_state in ('at_latest_press', 'after_latest_press'):
+            clock.now = plan.latest_press_at - .000001
+            if source_state == 'after_latest_press':
+                clock.now += .000010
+        return SimpleNamespace(healthy=True, held=source_state != 'released' or clock.now < 1.019)
+
+    mouse = SimpleNamespace(lock=threading.RLock(), snapshot=snapshot)
+    presses = []
+
+    class Output:
+        def pulse(self):
+            presses.append(clock.now)
+            return SimpleNamespace(requested_at=clock.now, syn_completed_at=clock.now)
+
+    budget = runtime._cv_budget_seconds([52.378], windows_capture=True)
+    assert runtime._service_timer_before_cv(engine, capture, anchor.sequence, mouse=mouse,
+                                            output=Output(), cv_budget=budget,
+                                            dxgi_frame=anchor)
+    assert capture.latest is newer
+    if source_state in ('same_source', 'at_latest_press', 'busy_then_ready'):
+        expected = {'same_source': plan.press_at, 'at_latest_press': plan.latest_press_at,
+                    'busy_then_ready': 1.026}[source_state]
+        assert presses == [pytest.approx(expected, abs=.000010)]
+        keydown = engine.take_events()[-1]
+        assert keydown['kind'] == 'KEYDOWN'
+        assert keydown['plan']['timing_mode'] == 'PREDICTED'
+        assert keydown['frame_at'] == engine.last_timestamp
+        if source_state == 'busy_then_ready':
+            assert 0 in waits
+    else:
+        assert not presses
+
+
 @pytest.mark.parametrize(('session','generation'),[
     ('20261017_002255_609230',45),('20261018_213036_227179',11),
     ('20261018_213036_227179',22)])

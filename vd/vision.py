@@ -10,6 +10,8 @@ import math
 import cv2
 import numpy as np
 
+from .image_io import read_image
+
 
 def configure_realtime_opencv():
     """Bound OpenCV's worker pool inside the latency-sensitive solver process."""
@@ -115,35 +117,56 @@ def arcs_from_score(score, minimum, maximum):
 class Detector:
     def __init__(self, template=None, ring_radius=66.0, *, roi_offset=(0, 0),
                  ui_scale=1.0):
-        path = Path(template) if template else Path(__file__).resolve().parents[1] / 'assets/space_template.png'
-        self.template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        if self.template is None:
-            raise ValueError(f'Cannot load prompt template: {path}')
+        assets = Path(__file__).resolve().parents[1] / 'assets'
+        # Both prompt canvases are aligned to the ring center. The update's
+        # jagged key outline coexists with the legacy Space icon in replays.
+        paths = (Path(template),) if template else (
+            assets / 'space_template.png', assets / 'space_template_20261024.png')
         self.ui_scale = float(ui_scale)
         if not math.isfinite(self.ui_scale) or self.ui_scale <= 0:
             raise ValueError('UI scale must be finite and positive')
-        if self.ui_scale != 1:
-            height, width = self.template.shape
-            self.template = cv2.resize(self.template,
-                (round(width*self.ui_scale),round(height*self.ui_scale)),
-                interpolation=cv2.INTER_AREA if self.ui_scale<1 else cv2.INTER_LINEAR)
+        templates = []
+        for path in paths:
+            prompt = read_image(path, cv2.IMREAD_GRAYSCALE)
+            if prompt is None:
+                raise ValueError(f'Cannot load prompt template: {path}')
+            if self.ui_scale != 1:
+                height, width = prompt.shape
+                prompt = cv2.resize(prompt,
+                    (round(width*self.ui_scale),round(height*self.ui_scale)),
+                    interpolation=cv2.INTER_AREA if self.ui_scale<1 else cv2.INTER_LINEAR)
+            templates.append(prompt)
+        self.templates = tuple(templates)
+        self.template = self.templates[0]
         self.ring_radius = float(ring_radius)*self.ui_scale
         self.roi_offset = tuple(roi_offset)
         self.angles = np.arange(720, dtype=np.float32) * (math.pi / 360)
+        self._cos=np.cos(self.angles)[:,None]
+        self._sin=np.sin(self.angles)[:,None]
+        self._ring_radii=np.linspace(self.ring_radius-3*self.ui_scale,
+                                     self.ring_radius+3*self.ui_scale,9,dtype=np.float32)
+        self._needle_radii=np.linspace(24*self.ui_scale,61*self.ui_scale,32,dtype=np.float32)
+        self._sample_maps={}
 
     def _sample(self, frame, center, radii):
         r = np.asarray(radii, np.float32)[None, :]
-        x = center[0] + np.cos(self.angles)[:, None] * r
-        y = center[1] + np.sin(self.angles)[:, None] * r
+        key=(tuple(center),r.shape,r.tobytes())
+        maps=self._sample_maps.get(key)
+        if maps is None:
+            maps=(center[0]+self._cos*r,center[1]+self._sin*r)
+            if len(self._sample_maps)>=8:
+                self._sample_maps.clear()
+            self._sample_maps[key]=maps
+        x,y=maps
         return cv2.remap(frame, x, y, cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_CONSTANT).astype(np.float32)
 
-    def _search_full(self, gray):
+    def _search_full(self, gray, template):
         height,width=gray.shape
-        th,tw=self.template.shape
+        th,tw=template.shape
         small=cv2.resize(gray,(round(width*.5),round(height*.5)),
                          interpolation=cv2.INTER_AREA)
-        small_template=cv2.resize(self.template,(round(tw*.5),round(th*.5)),
+        small_template=cv2.resize(template,(round(tw*.5),round(th*.5)),
                                   interpolation=cv2.INTER_AREA)
         result=cv2.matchTemplate(small,small_template,cv2.TM_CCOEFF_NORMED)
         _,coarse,_,location=cv2.minMaxLoc(result)
@@ -153,7 +176,7 @@ class Detector:
         top=round(location[1]*height/small.shape[0])
         x0=max(0,left-4);y0=max(0,top-4)
         x1=min(width,left+tw+5);y1=min(height,top+th+5)
-        result=cv2.matchTemplate(gray[y0:y1,x0:x1],self.template,
+        result=cv2.matchTemplate(gray[y0:y1,x0:x1],template,
                                  cv2.TM_CCOEFF_NORMED)
         _,score,_,location=cv2.minMaxLoc(result)
         return float(score),(x0+location[0],y0+location[1])
@@ -169,40 +192,49 @@ class Detector:
         if h < th or w < tw:
             raise ValueError('ROI is smaller than prompt template')
         score=-1.0
-        pos=(0,0)
+        prompt_center=None
         # The 1080p capture ROI has two observed prompt positions. Searching
         # only their small neighborhoods avoids a full ROI scan every frame.
         offset_x, offset_y = self.roi_offset
-        for candidate in dict.fromkeys((center_hint,
-                (160-offset_x,162.5-offset_y),(170-offset_x,82.5-offset_y))):
-            if candidate is None:
-                continue
-            left=round(candidate[0]-tw/2)
-            top=round(candidate[1]-th/2)
-            x0=max(0,left-5);y0=max(0,top-5)
-            x1=min(w,left+tw+5);y1=min(h,top+th+5)
-            if x1-x0<tw or y1-y0<th:
-                continue
-            result=cv2.matchTemplate(gray[y0:y1,x0:x1],self.template,
-                                     cv2.TM_CCOEFF_NORMED)
-            _,value,_,local=cv2.minMaxLoc(result)
-            if value>score:
-                score=value
-                pos=(x0+local[0],y0+local[1])
+        for template in self.templates:
+            th,tw=template.shape
+            for candidate in dict.fromkeys((center_hint,
+                    (160-offset_x,162.5-offset_y),(170-offset_x,82.5-offset_y))):
+                if candidate is None:
+                    continue
+                left=round(candidate[0]-tw/2)
+                top=round(candidate[1]-th/2)
+                x0=max(0,left-5);y0=max(0,top-5)
+                x1=min(w,left+tw+5);y1=min(h,top+th+5)
+                if x1-x0<tw or y1-y0<th:
+                    continue
+                result=cv2.matchTemplate(gray[y0:y1,x0:x1],template,
+                                         cv2.TM_CCOEFF_NORMED)
+                _,value,_,local=cv2.minMaxLoc(result)
+                if value>score:
+                    score=value
+                    prompt_center=(x0+local[0]+tw/2,y0+local[1]+th/2)
+                if candidate==center_hint and value>=.90:
+                    break
+            if score>=.90:
+                break
         if score < .80:
-            value,local=self._search_full(gray)
-            if local is not None and value>score:
-                score=value
-                pos=local
-        center = (pos[0] + tw/2, pos[1] + th/2) if score >= .80 else center_hint
+            for template in self.templates:
+                value,local=self._search_full(gray,template)
+                if local is not None and value>score:
+                    th,tw=template.shape
+                    score=value
+                    prompt_center=(local[0]+tw/2,local[1]+th/2)
+                if score>=.90:
+                    break
+        center = prompt_center if score >= .80 else center_hint
         if center is None:
             return Measurement(timestamp, None, float(score), None, None, (), 'NO_PROMPT')
         cx, cy = center
         radius = self.ring_radius + 4*self.ui_scale
         if not (radius <= cx < w-radius and radius <= cy < h-radius):
             return Measurement(timestamp, center, float(score), None, None, (), 'RING_OUTSIDE_ROI')
-        ring = self._sample(frame, center, np.linspace(
-            self.ring_radius-3*self.ui_scale,self.ring_radius+3*self.ui_scale,9))
+        ring = self._sample(frame,center,self._ring_radii)
         levels = ring.mean(axis=1)
         intensity = levels.mean(axis=1)
         white_threshold = min(185, max(160, float(np.median(intensity))+40))
@@ -219,8 +251,7 @@ class Detector:
             good=blacks[0]
         # A local angular ridge must persist along the radial segment. Broad
         # colored clothes/background can be red but do not form that ridge.
-        samples = self._sample(frame, center, np.linspace(
-            24*self.ui_scale,61*self.ui_scale,32))
+        samples = self._sample(frame,center,self._needle_radii)
         red = np.maximum(0, samples[:,:,2]-np.maximum(samples[:,:,0],samples[:,:,1]))
         side = np.maximum(np.roll(red,12,axis=0),np.roll(red,-12,axis=0))
         contrast = red-side

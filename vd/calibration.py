@@ -38,6 +38,8 @@ class FreezeObserver:
         self.offset_low=0.
         self.offset_high=0.
         self.tainted='LATE_DISPATCH' if late_dispatch else None
+        self.closed=False
+        self.center=None
 
     def _clear_plateau(self):
         self.plateau=[]
@@ -50,8 +52,22 @@ class FreezeObserver:
 
     def feed(self, measurement):
         t=measurement.timestamp
-        if t<=self.last_time:
+        if t==self.last_time:
+            return
+        if t<self.last_time:
             self.tainted='NONINCREASING_TIME'
+            return
+        if self.closed:
+            return
+        # Red scenery after the prompt disappears cannot replace this ring's
+        # already observed plateau. Missing white alone can be occlusion.
+        if measurement.center is None or measurement.prompt_score<.80:
+            self.closed=True
+            return
+        if self.center is None:
+            self.center=measurement.center
+        elif math.dist(self.center,measurement.center)>3:
+            self.closed=True
             return
         gap=t-self.last_time
         self.last_time=t
@@ -65,7 +81,7 @@ class FreezeObserver:
         if measurement.great is not None and (
                 abs(delta(measurement.great.center,self.great.center))>3
                 or abs(measurement.great.width-self.great.width)>3):
-            self._clear_plateau()
+            self.closed=True
             return
         if not measurement.candidates:
             if measurement.great is not None and not self._has_stable_suffix():

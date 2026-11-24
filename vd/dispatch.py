@@ -8,6 +8,8 @@ from contextlib import nullcontext
 from dataclasses import asdict
 import time
 
+from .input_state import InputDisarmed
+
 
 def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.monotonic):
     if output is not None and mouse is None:
@@ -18,9 +20,19 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
             engine.cancel('CAPTURE_LOST',now)
             return None
         frame=capture.latest
+        prediction_current=getattr(capture,'prediction_current',None)
         if frame is None or frame.sequence!=sequence:
-            engine.planner.invalidate('NEW_FRAME_PENDING')
+            if engine.planner.current is not None and now>engine.planner.current.valid_until:
+                engine.planner.invalidate('OBSERVATION_EXPIRED')
             engine.reason='NEW_FRAME_PENDING'
+            return None
+        def prediction_ready():
+            if prediction_current is None or prediction_current(frame):
+                return True
+            busy=getattr(capture,'prediction_busy',lambda:False)()
+            engine.reason='CAPTURE_WRITING' if busy else 'NEW_FRAME_PENDING'
+            return False
+        if not prediction_ready():
             return None
         if output is not None and frame.synthetic:
             engine.cancel('SYNTHETIC_INPUT_FORBIDDEN',now)
@@ -35,12 +47,18 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
                 engine.cancel('MOUSE_UNAVAILABLE',clock())
                 return None
             held=state.held if state is not None else True
+            if not prediction_ready():
+                return None
             plan=engine.poll(clock(),held=held,capture_alive=True)
             if plan is None:
                 return None
             if output is not None:
                 try:
                     keydown=output.pulse()
+                except InputDisarmed as exc:
+                    engine.emit('INPUT_DISARMED',clock(),error=str(exc),plan=asdict(plan))
+                    engine.cancel('INPUT_DISARMED',clock())
+                    return None
                 except BaseException as exc:
                     engine.emit('INPUT_FAILED',clock(),error=str(exc),plan=asdict(plan))
                     engine.cancel('INPUT_FAILED',clock())

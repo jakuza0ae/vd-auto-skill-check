@@ -31,6 +31,11 @@ class Frame:
     negotiated_caps: str
     worker_cpu_time_ns: int | None = None
     source_size: tuple[int, int] | None = None
+    source_present_id: int | None = None
+    source_generation: int | None = None
+    copy_completed_time: float | None = None
+    published_time: float | None = None
+    source_epoch: tuple[int, int] | None = None
 
 
 def default_roi(source):

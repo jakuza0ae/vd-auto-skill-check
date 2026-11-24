@@ -5,7 +5,7 @@
         "type": "GLOBAL",
         "library_path": "@LAYER_LIBRARY_PATH@",
         "api_version": "1.4.0",
-        "implementation_version": "2",
+        "implementation_version": "3",
         "description": "VD Auto Skill Check Vulkan Capture Layer",
         "functions": {
             "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"

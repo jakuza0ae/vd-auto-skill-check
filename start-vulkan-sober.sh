@@ -14,9 +14,17 @@ fi
 mkdir -p "$vulkan_dir"
 rm -f "$vulkan_dir/vd_layer_shm.dat" "$vulkan_dir/vd_layer_status.json" "$vulkan_dir/vd_layer.log"
 
+# Осветление в нашем слое: включается само, пока открыт Violence District (по логу Sober).
+# VD_BRIGHT=0 выключает; сила настраивается на лету в $vulkan_dir/vd_bright.conf.
+bright_args=()
+if [[ "${VD_BRIGHT:-1}" != 0 ]]; then
+  bright_args=(--env=VD_BRIGHT_ENABLE=1)
+fi
+
 flatpak run \
   --env=VD_CAPTURE_ENABLE=1 \
   --env=VD_CAPTURE_INTERVAL_MS=0 \
+  "${bright_args[@]}" \
   "$app_id" \
   >"$log_file" 2>&1 &
 

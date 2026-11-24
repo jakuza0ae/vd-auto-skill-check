@@ -65,7 +65,7 @@ def _armed_engine_with_pending_great():
     return engine, plan, great, good, center
 
 
-def test_fresh_observation_without_new_motion_preserves_pending_great_until_dispatch():
+def test_fresh_observation_without_motion_cancels_pending_great():
     engine, plan, great, good, center = _armed_engine_with_pending_great()
 
     engine.observe(
@@ -73,8 +73,8 @@ def test_fresh_observation_without_new_motion_preserves_pending_great_until_disp
         now=1.02,
     )
 
-    assert engine.planner.current is plan
-    assert engine.poll(plan.press_at + .0001, held=True, capture_alive=True) is plan
+    assert engine.planner.current is None
+    assert engine.poll(plan.press_at + .0001, held=True, capture_alive=True) is None
 
 
 def test_committed_great_survives_fresh_frame_after_center_while_window_is_reachable():
@@ -86,7 +86,9 @@ def test_committed_great_survives_fresh_frame_after_center_while_window_is_reach
         now=1.04,
     )
 
-    assert engine.planner.current is plan
+    assert engine.planner.current is not plan
+    plan=engine.planner.current
+    assert plan.press_at<1.05
     assert engine.planner.current.target_grade == 'GREAT'
     assert engine.poll(plan.press_at + .0001, held=True, capture_alive=True) is plan
 

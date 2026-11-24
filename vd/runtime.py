@@ -43,10 +43,41 @@ def _record_sample(samples, name, value, lifetime_max):
     lifetime_max[name]=max(value,lifetime_max.get(name,value))
 
 
+def _service_timer_before_cv(engine,capture,sequence,*,mouse,output,cv_budget,stop_at=None):
+    """Reserve the last CV-sized slice for a pending, still validated timer.
+
+    Publication retries read only status, never pixels. Every dispatch attempt
+    still checks source identity, capture age and the current mouse state.
+    """
+    plan=engine.planner.current
+    now=time.monotonic()
+    if plan is None or plan.press_at-now>cv_budget:
+        return False
+    deadline=min(plan.valid_until,now+cv_budget+.001)
+    if stop_at is not None:
+        deadline=min(deadline,stop_at)
+    while now<=deadline:
+        remaining=plan.press_at-now
+        if remaining<=0:
+            dispatch(engine,capture,sequence,mouse=mouse,output=output,clock=time.monotonic)
+            if (engine.planner.current is not plan or engine.reason!='CAPTURE_WRITING'):
+                return True
+            now=time.monotonic()
+            remaining=.0002
+        if now>=deadline:
+            break
+        # A desktop sleep may overshoot the whole white window. Match capture's
+        # bounded fine polling in the final millisecond, only for a pending key.
+        if remaining>.001:
+            time.sleep(min(remaining-.001,deadline-now))
+        now=time.monotonic()
+    return True
+
+
 def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncertainty,
                 physical=False, learn_lead=False, recording=True,
                 capture_priority=5, variant='baseline', capture_source='monitor',
-                normalize_window_scale=False, video_recording=True):
+                normalize_window_scale=False, video_recording=True, capture_factory=None):
     if physical and synthetic:
         raise ValueError('Physical input is forbidden for synthetic capture')
     if learn_lead and not physical:
@@ -60,20 +91,27 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
     last=-1
     presses=0
     keydowns=0
+    deadline_cv_deferrals=0
     mouse=None
     output=None
     mode='run' if physical else 'dry-run'
+    windows_capture=capture_source=='dxgi'
+    held_source=('win32' if windows_capture else 'evdev') if physical else 'assumed_for_dry_run'
     observer=None
     observer_generation=None
     observer_dispatch_lag=0.0
     observer_calibration_applied=False
-    estimator=LeadEstimator(lead_seconds,lead_uncertainty)
+    estimator=LeadEstimator(0.0,0.0)
     frame_processing_ms=deque(maxlen=600)
+    active_frame_processing_ms=deque(maxlen=600)
+    active_source_age_ms=deque(maxlen=600)
+    active_cv_ms=deque(maxlen=600)
     frame_delivery_gap_ms=deque(maxlen=600)
     frame_age_ms=deque(maxlen=600)
     capture_pipe_age_ms=deque(maxlen=600)
     capture_worker_cpu_percent=deque(maxlen=600)
     lifetime_max={}
+    previous_source_identity=None
     previous_received_time=None
     previous_worker_cpu_time_ns=None
     previous_worker_received_time=None
@@ -87,13 +125,21 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                 capture_priority=capture_priority,capture_source=capture_source,
                 normalize_window_scale=normalize_window_scale,
                 lead_seconds=lead_seconds,lead_uncertainty=lead_uncertainty,
-                learn_lead=learn_lead,
+                learn_lead=learn_lead,timing_model="response_plus_dispatch_v1",
                 video_sampling=('full_rate_during_check_1fps_while_idle'
                                 if video_recording else 'disabled'),
-                held_source='evdev' if physical else 'assumed_for_dry_run',
+                held_source=held_source,
                 game_outcome_measured=False),record_video=video_recording))
         else:
             recorder=_NullRecorder()
+
+        def timing_components():
+            return dict(response_delay=lead_seconds,response_uncertainty=lead_uncertainty,
+                dispatch_delay=engine.planner.lead-lead_seconds,
+                dispatch_uncertainty=engine.planner.lead_uncertainty-lead_uncertainty,
+                estimated_dispatch_delay=estimator.lead,
+                estimated_dispatch_uncertainty=estimator.uncertainty,
+                learning_enabled=learn_lead)
 
         def events():
             nonlocal presses,keydowns,observer,observer_generation
@@ -101,6 +147,8 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
             for event in engine.take_events():
                 event['physical_input']=(None if event['kind']=='INPUT_FAILED'
                                          else event['kind']=='KEYDOWN')
+                if event['kind'] in ('PRESS_CLAIM','KEYDOWN'):
+                    event['timing_components']=timing_components()
                 recorder.event(event)
                 if event['kind']=='PRESS_CLAIM':
                     presses+=1
@@ -117,8 +165,8 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                         physical=physical,eligible=eligible)
                     observer_calibration_applied=updated and learn_lead
                     if observer_calibration_applied:
-                        engine.planner.lead=estimator.lead
-                        engine.planner.lead_uncertainty=estimator.uncertainty
+                        engine.planner.lead=lead_seconds+estimator.lead
+                        engine.planner.lead_uncertainty=lead_uncertainty+estimator.uncertainty
                     if event['prefire_motion'] is not None:
                         observer=FreezeObserver(motion=Motion(**event['prefire_motion']),
                             press_at=event['at'],frame_at=event['frame_at'],
@@ -134,7 +182,9 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                         physical_input=False,game_outcome_measured=False,landing=asdict(landing),
                         calibration_reason=estimator.reason,
                         calibration_applied=observer_calibration_applied,
-                        estimated_lead=estimator.lead,estimated_uncertainty=estimator.uncertainty)
+                        estimated_lead=engine.planner.lead,estimated_uncertainty=engine.planner.lead_uncertainty,
+                        response_delay=lead_seconds,response_uncertainty=lead_uncertainty,
+                        dispatch_delay=estimator.lead,dispatch_uncertainty=estimator.uncertainty)
                     recorder.event(diagnostic)
                     print(json.dumps(diagnostic),flush=True)
                     observer=None
@@ -142,10 +192,15 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                     observer_calibration_applied=False
 
         try:
-            capture=stack.enter_context(PortalCapture(synthetic=synthetic,fps=fps,
-                                                     priority=capture_priority,
-                                                     source=capture_source,
-                                                     normalize_window_scale=normalize_window_scale))
+            if capture_factory is None:
+                capture=PortalCapture(synthetic=synthetic,fps=fps,
+                    priority=capture_priority,source=capture_source,
+                    normalize_window_scale=normalize_window_scale)
+            else:
+                capture=capture_factory()
+            capture=stack.enter_context(capture)
+            if recording and hasattr(capture,'start_telemetry'):
+                capture.start_telemetry(recorder.event)
             frame=capture.next(timeout=65)
             if frame is None:
                 raise RuntimeError('No first frame')
@@ -161,10 +216,18 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
             recorder.metadata['capture_frame_size']=[frame.image.shape[1],frame.image.shape[0]]
             if getattr(capture, 'roi', None) is not None:
                 recorder.metadata['capture_roi']=list(capture.roi)
+            physical_roi=getattr(capture,'physical_roi',None)
+            if physical_roi is not None:
+                recorder.metadata['capture_physical_roi']=list(physical_roi)
             recorder.metadata['detector_roi_offset']=list(detector.roi_offset)
             started_wall=time.monotonic()
             started_cpu=time.process_time()
-            if physical:
+            if physical and windows_capture:
+                from vd.windows_input import WindowsMouseMonitor, WindowsSpaceOutput
+                mouse=stack.enter_context(WindowsMouseMonitor(
+                    window_matches_capture=capture.window_matches_capture))
+                output=stack.enter_context(WindowsSpaceOutput(mouse))
+            elif physical:
                 try:
                     from vd.input import MouseMonitor, SpaceOutput
                 except ImportError as exc:
@@ -207,12 +270,29 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                         previous_worker_received_time=frame.received_time
                     skipped+=max(0,frame.sequence-last-1) if last>=0 else 0
                     last=frame.sequence
+                    generation=getattr(frame,'source_generation',None)
+                    identity=(getattr(frame,'source_epoch',None),generation)
+                    if (previous_source_identity is not None and identity!=(None,None)
+                            and previous_source_identity!=identity):
+                        engine.cancel('SOURCE_RECREATED',time.monotonic())
+                        if observer is not None:
+                            observer.tainted='SOURCE_RECREATED'
+                    previous_source_identity=identity
                     if not held:
                         engine.cancel('LMB_RELEASED',time.monotonic())
                     elif frame.media_time is None:
                         engine.cancel('NO_MEDIA_TIMESTAMP',time.monotonic())
                     else:
+                        recent_cv=sorted(list(active_cv_ms)[-32:])
+                        cv_budget=min(.012,max(.004,
+                            (recent_cv[int(.95*len(recent_cv))]/1000+.001) if recent_cv else .004))
+                        if _service_timer_before_cv(engine,capture,last,mouse=mouse,output=output,
+                                cv_budget=cv_budget,stop_at=until):
+                            deadline_cv_deferrals+=1
+                            events()
+                        cv_started=time.perf_counter()
                         m=detector.measure(frame.image,frame.media_time,center_hint=engine.center)
+                        cv_elapsed_ms=(time.perf_counter()-cv_started)*1000
                         m=retained_target(m,great=engine.target,good=engine.good,center=engine.center)
                         measurement_reasons[m.reason]+=1
                         now=time.monotonic()
@@ -221,22 +301,30 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                                 observer.tainted='STALE_FRAME'
                             observer.feed(m)
                         engine.observe(m,now=now,held=held)
+                        if engine.active or engine.pending is not None:
+                            _record_sample(active_cv_ms,'active_cv_ms',cv_elapsed_ms,lifetime_max)
+                            _record_sample(active_source_age_ms,'active_source_age_ms',
+                                max(0,(now-frame.media_time)*1000),lifetime_max)
                         dispatch(engine,capture,last,mouse=mouse,output=output,clock=time.monotonic)
                     decision_time=time.monotonic()
                     state=engine.snapshot()
+                    state['timing_components']=timing_components()
                     if held and frame.media_time is not None:
                         state['measurement']=asdict(m)
                     reasons[state['reason']]+=1
                     events()
-                    if video_recording and (
+                    if (held and (engine.active or engine.pending is not None)) or (video_recording and (
                             held and engine.active
-                            or frame.received_time-last_idle_recorded_at>=1):
+                            or frame.received_time-last_idle_recorded_at>=1)):
                         recorder.submit(frame,decision_time=decision_time,held=held,
                                         state=state,events=[])
                         if not held or not engine.active:
                             last_idle_recorded_at=frame.received_time
-                    _record_sample(frame_processing_ms,'frame_processing_ms',
-                        (time.perf_counter()-frame_started)*1000,lifetime_max)
+                    processing_ms=(time.perf_counter()-frame_started)*1000
+                    _record_sample(frame_processing_ms,'frame_processing_ms',processing_ms,lifetime_max)
+                    if held and (engine.active or engine.pending is not None):
+                        _record_sample(active_frame_processing_ms,'active_frame_processing_ms',
+                            processing_ms,lifetime_max)
                     nframes+=1
                 else:
                     dispatch(engine,capture,last,mouse=mouse,output=output,clock=time.monotonic)
@@ -246,6 +334,12 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                 timeout=.020 if until is None else min(.020,max(0,until-now))
                 if plan is not None:
                     timeout=min(timeout,max(0,plan.press_at-now),max(0,plan.valid_until-now))
+                elif (engine.active and not engine.planner.fired and engine.attempt_at is not None
+                        and engine.last_timestamp is not None
+                        and now-engine.last_timestamp<=engine.planner.max_age):
+                    timeout=min(timeout,max(0,engine.attempt_at-now))
+                if hasattr(capture,'set_dispatch_deadline'):
+                    capture.set_dispatch_deadline(plan.press_at if plan is not None else None)
                 frame=capture.next(last,timeout=timeout)
         except BaseException as exc:
             recorder.metadata['runtime_error']=str(exc) or type(exc).__name__
@@ -258,6 +352,9 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
             elapsed=max(time.monotonic()-started_wall,1e-9)
             performance=dict(
                 frame_processing_ms=_timing_summary(frame_processing_ms),
+                active_frame_processing_ms=_timing_summary(active_frame_processing_ms),
+                active_source_age_ms=_timing_summary(active_source_age_ms),
+                active_cv_ms=_timing_summary(active_cv_ms),
                 frame_delivery_gap_ms=_timing_summary(frame_delivery_gap_ms),
                 frame_age_ms=_timing_summary(frame_age_ms),
                 capture_pipe_age_ms=_timing_summary(capture_pipe_age_ms),
@@ -266,10 +363,14 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                 elapsed_seconds=round(elapsed,3),
                 main_cpu_percent=round(100*(time.process_time()-started_cpu)/elapsed,1),
                 profile_window_frames=frame_processing_ms.maxlen)
+            performance['deadline_cv_deferrals']=deadline_cv_deferrals
             recorder.metadata['performance']=performance
             recorder.metadata['final_lead_estimate']=dict(lead=estimator.lead,
                 uncertainty=estimator.uncertainty,reason=estimator.reason,
-                samples=estimator.samples,applied=learn_lead)
+                samples=estimator.samples,applied=learn_lead,
+                response_delay=lead_seconds,response_uncertainty=lead_uncertainty,
+                effective_lead=engine.planner.lead,
+                effective_uncertainty=engine.planner.lead_uncertainty)
             if not recording:
                 print(json.dumps(dict(kind='PERFORMANCE',**recorder.metadata['performance']),
                                  ensure_ascii=False),flush=True)
@@ -293,6 +394,7 @@ def replay(directory):
     events=[]
     previous_decision=None
     previous_held=True
+    previous_source_identity=None
     for row,image in read_recording(directory):
         now=row['decision_time']
         if previous_decision is not None and now<previous_decision:
@@ -306,10 +408,29 @@ def replay(directory):
             settings=row['state']
             lead=float(settings['lead_seconds'])
             uncertainty=float(settings['lead_uncertainty'])
-            if not 0<=lead<=.300 or not 0<=uncertainty<=.100:
+            additive=manifest.get('timing_model')=='response_plus_dispatch_v1'
+            if not (0<=lead<=(.550 if additive else .300)
+                    and 0<=uncertainty<=(.350 if additive else .100)):
                 raise ValueError('Invalid recorded lead settings')
+            if additive:
+                parts=settings['timing_components']
+                response=float(parts['response_delay'])
+                response_uncertainty=float(parts['response_uncertainty'])
+                dispatch_delay=float(parts['dispatch_delay'])
+                dispatch_uncertainty=float(parts['dispatch_uncertainty'])
+                if not (0<=response<=.300 and 0<=response_uncertainty<=.100
+                        and 0<=dispatch_delay<=.250 and 0<=dispatch_uncertainty<=.250
+                        and abs(lead-response-dispatch_delay)<1e-9
+                        and abs(uncertainty-response_uncertainty-dispatch_uncertainty)<1e-9):
+                    raise ValueError('Invalid recorded timing components')
             engine.planner.lead=lead
             engine.planner.lead_uncertainty=uncertainty
+        identity=(tuple(row['source_epoch']) if row.get('source_epoch') is not None else None,
+                  row.get('source_generation'))
+        if (previous_source_identity is not None and identity!=(None,None)
+                and previous_source_identity!=identity):
+            engine.cancel('SOURCE_RECREATED',now)
+        previous_source_identity=identity
         timestamp=row['media_time']
         if timestamp is None:
             engine.cancel('NO_MEDIA_TIMESTAMP',now)

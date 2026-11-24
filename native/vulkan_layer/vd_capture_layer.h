@@ -7,9 +7,9 @@
 #define VD_LAYER_NAME "VK_LAYER_VD_capture"
 #define VD_LAYER_DESCRIPTION "VD Auto Skill Check Vulkan Capture Layer"
 #define VD_LAYER_SPEC_VERSION VK_API_VERSION_1_3
-#define VD_LAYER_IMPL_VERSION 2
+#define VD_LAYER_IMPL_VERSION 3
 #define VD_LAYER_SHM_MAGIC 0x56444C59u // 'VDLY'
-#define VD_LAYER_SHM_VERSION 2u
+#define VD_LAYER_SHM_VERSION 3u
 #define VD_CAPTURE_MAX_WIDTH 256u
 #define VD_CAPTURE_MAX_HEIGHT 256u
 #define VD_CAPTURE_BYTES_PER_PIXEL 4u
@@ -58,7 +58,11 @@ struct VdLayerShmHeader {
     uint64_t roi_capture_count;
     uint64_t roi_capture_timestamp_ns;
 
-    uint8_t padding[112];
+    uint64_t source_present_id;
+    uint64_t swapchain_generation;
+    uint64_t copy_completed_ns;
+    uint64_t published_ns;
+    uint8_t padding[80];
 };
 #pragma pack(pop)
 

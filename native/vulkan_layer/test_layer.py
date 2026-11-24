@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import unittest
+import tempfile
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -18,7 +19,7 @@ LAYER_MANIFEST = BUILD_DIR / "VkLayer_VD_capture.json"
 SOBER_DATA_DIR = Path.home() / ".var" / "app" / "org.vinegarhq.Sober" / "data"
 SOBER_VULKAN_DIR = SOBER_DATA_DIR / "vulkan"
 VIEWER_PATH = ROOT_DIR / "tools" / "vulkan_roi_viewer.py"
-HEADER_FORMAT = "=IIIIIIQQQfIIIIIII64sIIIIIII4xQQ112s"
+HEADER_FORMAT = "=IIIIIIQQQfIIIIIII64sIIIIIII4xQQQQQQ80s"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
 
@@ -66,12 +67,23 @@ def load_viewer_module():
 class TestVulkanLayer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.isolated_runtime=tempfile.TemporaryDirectory(prefix='vd-layer-unit-')
+        cls.old_runtime_dir=os.environ.get('VD_LAYER_DIR')
+        os.environ['VD_LAYER_DIR']=cls.isolated_runtime.name
         build_script = ROOT_DIR / "native" / "vulkan_layer" / "build_layer.sh"
         result = subprocess.run([str(build_script)], capture_output=True, text=True)
         if result.returncode != 0:
             raise AssertionError(f"Build failed:\n{result.stdout}\n{result.stderr}")
         if not LAYER_LIB.exists() or not LAYER_MANIFEST.exists():
             raise AssertionError("Vulkan layer build outputs are missing")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.old_runtime_dir is None:
+            os.environ.pop('VD_LAYER_DIR',None)
+        else:
+            os.environ['VD_LAYER_DIR']=cls.old_runtime_dir
+        cls.isolated_runtime.cleanup()
 
     def test_01_symbols_and_loader_negotiation(self):
         lib = ctypes.CDLL(str(LAYER_LIB))
@@ -90,7 +102,7 @@ class TestVulkanLayer(unittest.TestCase):
         props = (VkLayerProperties * count.value)()
         self.assertEqual(enum_props(ctypes.byref(count), props), 0)
         self.assertEqual(props[0].layerName.decode(), "VK_LAYER_VD_capture")
-        self.assertEqual(props[0].implementationVersion, 2)
+        self.assertEqual(props[0].implementationVersion, 3)
 
         negotiate = lib.vkNegotiateLoaderLayerInterfaceVersion
         negotiate.argtypes = [ctypes.POINTER(VkNegotiateLayerInterface)]
@@ -103,11 +115,13 @@ class TestVulkanLayer(unittest.TestCase):
         self.assertTrue(info.pfnGetInstanceProcAddr)
         self.assertTrue(info.pfnGetDeviceProcAddr)
         self.assertFalse(info.pfnGetPhysicalDeviceProcAddr)
+        self.assertFalse((Path(self.isolated_runtime.name)/'vd_layer_shm.dat').exists(),
+                         'Loader negotiation must not create or overwrite runtime SHM')
 
     def test_02_shared_memory_contract_is_stable(self):
         self.assertEqual(HEADER_SIZE, 304)
         header_text = (ROOT_DIR / "native" / "vulkan_layer" / "vd_capture_layer.h").read_text()
-        self.assertIn("VD_LAYER_SHM_VERSION 2u", header_text)
+        self.assertIn("VD_LAYER_SHM_VERSION 3u", header_text)
         self.assertIn("VD_CAPTURE_MAX_WIDTH 256u", header_text)
         self.assertIn("VD_CAPTURE_MAX_HEIGHT 256u", header_text)
         self.assertIn("roi_capture_count", header_text)
@@ -118,7 +132,7 @@ class TestVulkanLayer(unittest.TestCase):
         layer = manifest["layer"]
         self.assertEqual(layer["name"], "VK_LAYER_VD_capture")
         self.assertEqual(layer["api_version"], "1.4.0")
-        self.assertEqual(layer["implementation_version"], "2")
+        self.assertEqual(layer["implementation_version"], "3")
         self.assertEqual(layer["disable_environment"], {"DISABLE_VD_LAYER": "1"})
 
         source = (ROOT_DIR / "native" / "vulkan_layer" / "vd_capture_layer.cpp").read_text()
@@ -141,7 +155,8 @@ class TestVulkanLayer(unittest.TestCase):
         finally:
             out.unlink(missing_ok=True)
 
-    @unittest.skipUnless(have_flatpak_sober(), "Sober Flatpak not installed")
+    @unittest.skipUnless(os.environ.get("VD_RUN_FLATPAK_TESTS")=="1" and have_flatpak_sober(),
+                         "opt-in isolated Flatpak tests: VD_RUN_FLATPAK_TESTS=1")
     def test_05_flatpak_extension_install_and_discovery(self):
         install = ROOT_DIR / "native" / "vulkan_layer" / "install_sober_layer.sh"
         result = subprocess.run([str(install)], capture_output=True, text=True, timeout=120)
@@ -162,7 +177,8 @@ class TestVulkanLayer(unittest.TestCase):
         )
         self.assertEqual(check.returncode, 0, f"Flatpak extension discovery failed: {check.stderr}")
 
-    @unittest.skipUnless(have_flatpak_sober(), "Sober Flatpak not installed")
+    @unittest.skipUnless(os.environ.get("VD_RUN_FLATPAK_TESTS")=="1" and have_flatpak_sober(),
+                         "opt-in isolated Flatpak tests: VD_RUN_FLATPAK_TESTS=1")
     def test_06_deterministic_roi_pixel_readback(self):
         install = ROOT_DIR / "native" / "vulkan_layer" / "install_sober_layer.sh"
         result = subprocess.run([str(install)], capture_output=True, text=True, timeout=120)
@@ -179,33 +195,21 @@ class TestVulkanLayer(unittest.TestCase):
         )
         self.assertEqual(compile_result.returncode, 0, f"Test app compile failed: {compile_result.stderr}")
 
-        for path in (
-            SOBER_VULKAN_DIR / "vd_layer_shm.dat",
-            SOBER_VULKAN_DIR / "vd_layer_status.json",
-            SOBER_VULKAN_DIR / "vd_layer.log",
-        ):
-            path.unlink(missing_ok=True)
-
-        run_result = subprocess.run(
-            [
-                "flatpak", "run",
-                "--env=VD_CAPTURE_ENABLE=1",
-                "--env=VD_CAPTURE_INTERVAL_MS=0",
-                f"--command={app_bin}",
-                "org.vinegarhq.Sober",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        self.assertEqual(
-            run_result.returncode, 0,
-            f"Capture app failed:\nSTDOUT:\n{run_result.stdout}\nSTDERR:\n{run_result.stderr}",
-        )
-        self.assertIn("CAPTURE_TEST_OK", run_result.stdout)
-
-        viewer = load_viewer_module()
-        snap = viewer.snapshot(SOBER_VULKAN_DIR / "vd_layer_shm.dat")
+        sys.path.insert(0,str(ROOT_DIR))
+        from vd.vulkan_capture import VulkanCapture
+        with tempfile.TemporaryDirectory(prefix="vd-layer-test-",dir=SOBER_DATA_DIR) as isolated:
+            isolated=Path(isolated)
+            with VulkanCapture(shm_path=isolated/"vd_layer_shm.dat"):
+                run_result = subprocess.run(
+                    ["flatpak", "run", "--env=VD_CAPTURE_ENABLE=1",
+                     "--env=VD_CAPTURE_INTERVAL_MS=0",f"--env=VD_LAYER_DIR={isolated}",
+                     f"--command={app_bin}", "org.vinegarhq.Sober"],
+                    capture_output=True,text=True,timeout=60)
+                self.assertEqual(run_result.returncode,0,
+                    f"Capture app failed:\nSTDOUT:\n{run_result.stdout}\nSTDERR:\n{run_result.stderr}")
+                self.assertIn("CAPTURE_TEST_OK",run_result.stdout)
+                viewer=load_viewer_module()
+                snap=viewer.snapshot(isolated/"vd_layer_shm.dat")
         self.assertGreater(snap["capture_count"], 0)
         self.assertGreater(snap["width"], 0)
         self.assertGreater(snap["height"], 0)

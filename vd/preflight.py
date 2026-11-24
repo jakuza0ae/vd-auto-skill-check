@@ -1,9 +1,11 @@
 """Read-only environment report; never create UInput or start capture."""
+import ctypes
 import importlib.metadata
 import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 
 
@@ -49,3 +51,51 @@ def inspect_system():
     return dict(platform=platform.platform(),python=platform.python_version(),
                 versions=versions,checks=checks,ok=all(c['ok'] for c in checks),
                 physical_input_tested=False,portal_selection_tested=False)
+
+
+def inspect_windows_system():
+    checks = []
+    versions = {}
+    for package in ('numpy', 'opencv-python-headless'):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
+    checks.append(dict(name='python_dependencies', ok=all(versions.values()),
+                       detail=versions))
+
+    try:
+        from .windows_capture import helper_path
+        helper = helper_path()
+        checks.append(dict(name='capture_helper', ok=helper.is_file(), detail=str(helper)))
+    except (ImportError, OSError) as exc:
+        checks.append(dict(name='capture_helper', ok=False, detail=str(exc)))
+
+    for name, libraries in (
+        ('dxgi_bindings', {'dxgi': ('CreateDXGIFactory1',),
+                           'd3d11': ('D3D11CreateDevice',)}),
+        ('win32_input_bindings', {'user32': ('GetAsyncKeyState', 'SendInput')}),
+    ):
+        try:
+            for dll, exports in libraries.items():
+                library = ctypes.WinDLL(dll)
+                for export in exports:
+                    getattr(library, export)
+        except (AttributeError, OSError) as exc:
+            checks.append(dict(name=name, ok=False, detail=str(exc)))
+        else:
+            checks.append(dict(name=name, ok=True, detail=list(libraries)))
+
+    try:
+        from .vision import Detector
+        detector = Detector()
+    except (ImportError, OSError, ValueError) as exc:
+        checks.append(dict(name='prompt_templates', ok=False, detail=str(exc)))
+    else:
+        checks.append(dict(name='prompt_templates', ok=True,
+                           detail=len(detector.templates)))
+
+    return dict(platform=platform.platform(), python=platform.python_version(),
+                versions=versions, checks=checks, ok=all(check['ok'] for check in checks),
+                optional_ffmpeg_available=shutil.which('ffmpeg') is not None,
+                capture_tested=False, physical_input_tested=False)

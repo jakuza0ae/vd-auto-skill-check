@@ -10,7 +10,7 @@ import zlib
 from pathlib import Path
 
 SHM_MAGIC = 0x56444C59
-HEADER_FORMAT = "=IIIIIIQQQfIIIIIII64sIIIIIII4xQQ112s"
+HEADER_FORMAT = "=IIIIIIQQQfIIIIIII64sIIIIIII4xQQQQQQ80s"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 BGRA_FORMATS = {44, 50}  # VK_FORMAT_B8G8R8A8_UNORM/SRGB
 RGBA_FORMATS = {37, 43}  # VK_FORMAT_R8G8B8A8_UNORM/SRGB
@@ -62,7 +62,7 @@ def snapshot(shm_path: Path, retries: int = 50):
             roi_x, roi_y, roi_w, roi_h, roi_stride, roi_offset, roi_size = values1[18:25]
             capture_count, capture_ts = values1[25:27]
             if roi_w == 0 or roi_h == 0 or roi_size == 0:
-                raise RuntimeError("No captured ROI yet. Start Sober with VD_CAPTURE_ENABLE=1 and enter a Vulkan scene.")
+                raise RuntimeError("No captured ROI yet. Start the solver or run-vulkan.py --observe to enable capture.")
             if roi_stride != roi_w * 4 or roi_size != roi_stride * roi_h:
                 raise RuntimeError("Unexpected ROI layout")
             end = roi_offset + roi_size

@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import fcntl
+import json
 import mmap
+import os
 from pathlib import Path
 import struct
 import threading
 import time
 
+import cv2
 import numpy as np
 
 from vd.capture import DEFAULT_ROI, Frame
 
 
 SHM_MAGIC = 0x56444C59
-SHM_VERSION = 2
+SHM_VERSION = 3
 STATUS_CAPTURE_ENABLED = 1 << 2
 STATUS_PIXELS_READY = 1 << 3
-HEADER_FORMAT = "=IIIIIIQQQfIIIIIII64sIIIIIII4xQQ112s"
+HEADER_FORMAT = "=IIIIIIQQQfIIIIIII64sIIIIIII4xQQQQQQ80s"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 BGRA_FORMATS = {44, 50}  # VK_FORMAT_B8G8R8A8_UNORM/SRGB
 RGBA_FORMATS = {37, 43}  # VK_FORMAT_R8G8R8A8_UNORM/SRGB
@@ -70,6 +74,112 @@ class VulkanCapture:
         self.proc = _CaptureProcessState(self)
         self._file = None
         self._mapping = None
+        self._lease_file = None
+        self._lease_stop = threading.Event()
+        self._lease_thread = None
+        self._status_stop = threading.Event()
+        self._status_thread = None
+        self._source_epoch = None
+        self._sequence_offset = 0
+        self._last_snapshot_sequence = -1
+        self.dispatch_deadline = None
+
+    def _ensure_lease(self):
+        if self._lease_file is not None:
+            return
+        path=self.shm_path.with_name('vd_layer_control.dat')
+        f=os.fdopen(os.open(path,os.O_RDWR|os.O_CREAT,0o600),'r+b')
+        try:
+            fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+            os.ftruncate(f.fileno(),16)
+            os.pwrite(f.fileno(),struct.pack('=IIQ',SHM_MAGIC,SHM_VERSION,0),0)
+            self._lease_file=f
+            self._heartbeat()
+            self._lease_thread=threading.Thread(target=self._lease_loop,
+                name='VD-vulkan-consumer',daemon=True)
+            self._lease_thread.start()
+        except BaseException:
+            f.close()
+            self._lease_file=None
+            raise
+
+    def _heartbeat(self):
+        os.pwrite(self._lease_file.fileno(),
+            struct.pack('=Q',time.monotonic_ns()+2_000_000_000),8)
+
+    def _lease_loop(self):
+        while not self._lease_stop.wait(.250):
+            try:
+                self._heartbeat()
+            except OSError as exc:
+                self.error='Consumer heartbeat failed: '+str(exc)
+                return
+
+    def start_telemetry(self, callback):
+        """Sample native counters off the decision and heartbeat threads."""
+        if self._status_thread is not None:
+            raise RuntimeError('Native telemetry already started')
+        path=self.shm_path.with_name('vd_layer_status.json')
+        def sample():
+            previous=None
+            while not self._status_stop.is_set():
+                try:
+                    with path.open() as source:
+                        status=json.loads(source.read(65536))
+                    stamp=status.get('status_time_ns')
+                    now=time.monotonic()
+                    if (isinstance(stamp,int) and stamp!=previous
+                            and 0<=now-stamp/1e9<=2
+                            and status.get('present_timing')):
+                        callback(dict(kind='NATIVE_PRESENT_TIMING',at=now,status=status))
+                        previous=stamp
+                except (OSError,ValueError):
+                    pass
+                if self._status_stop.wait(.250):
+                    break
+        self._status_thread=threading.Thread(target=sample,
+            name='VD-native-telemetry',daemon=True)
+        self._status_thread.start()
+
+    def has_newer(self, sequence):
+        mm=self._mapping
+        if mm is None:
+            return True
+        try:
+            first=struct.unpack_from('=I',mm,20)[0]
+            flags=struct.unpack_from('=I',mm,12)[0]
+            count=struct.unpack_from('=Q',mm,176)[0]
+            epoch=(struct.unpack_from('=I',mm,16)[0],struct.unpack_from('=Q',mm,24)[0])
+            second=struct.unpack_from('=I',mm,20)[0]
+            return bool(not flags & STATUS_PIXELS_READY
+                        or first&1 or first!=second
+                        or epoch!=getattr(self,'_source_epoch',None)
+                        or count+getattr(self,'_sequence_offset',0)!=sequence)
+        except (ValueError,struct.error):
+            return True
+
+    def prediction_current(self, frame):
+        mm=self._mapping
+        if mm is None:
+            return False
+        try:
+            first=struct.unpack_from('=I',mm,20)[0]
+            flags=struct.unpack_from('=I',mm,12)[0]
+            epoch=(struct.unpack_from('=I',mm,16)[0],struct.unpack_from('=Q',mm,24)[0])
+            generation=struct.unpack_from('=Q',mm,200)[0]
+            second=struct.unpack_from('=I',mm,20)[0]
+            return bool(not first&1 and first==second and flags & STATUS_PIXELS_READY
+                and epoch==frame.source_epoch and generation==frame.source_generation)
+        except (ValueError,struct.error):
+            return False
+
+    def prediction_busy(self):
+        """Pixel publication is transient; it does not require another CV pass."""
+        try:
+            return bool(self._mapping is not None
+                        and struct.unpack_from('=I',self._mapping,20)[0]&1)
+        except (ValueError,struct.error):
+            return False
 
     def _close_mapping(self):
         if self._mapping is not None:
@@ -94,7 +204,7 @@ class VulkanCapture:
         self._mapping = mm
         return True
 
-    def _snapshot(self):
+    def _snapshot(self, after=-1, deadline=None):
         if not self._ensure_mapping():
             return None
         mm = self._mapping
@@ -102,7 +212,9 @@ class VulkanCapture:
             self._close_mapping()
             return None
 
-        for _ in range(4):
+        for attempt in range(4):
+            if attempt and deadline is not None and time.monotonic()>=deadline:
+                return None
             try:
                 header = bytes(mm[:HEADER_SIZE])
                 values = struct.unpack(HEADER_FORMAT, header)
@@ -115,10 +227,10 @@ class VulkanCapture:
                 raise RuntimeError("VD Vulkan shared-memory magic not found")
             if version != SHM_VERSION or struct_size != HEADER_SIZE:
                 raise RuntimeError(
-                    f"VD Vulkan shared-memory contract mismatch: version={version} size={struct_size}"
+                    f"VD Vulkan layer v{SHM_VERSION} required (found v{version}, size={struct_size}). "
+                    "Close Sober manually and start it again using ./start-vulkan-sober.sh."
                 )
             if seq1 & 1:
-                time.sleep(0.001)
                 continue
             if not (flags & STATUS_CAPTURE_ENABLED) or not (flags & STATUS_PIXELS_READY):
                 return None
@@ -126,6 +238,14 @@ class VulkanCapture:
             sw_width, sw_height, sw_format = values[11:14]
             roi_x, roi_y, roi_w, roi_h, roi_stride, roi_offset, roi_size = values[18:25]
             capture_count, capture_ts = values[25:27]
+            epoch=(_pid,values[6])
+            offset=getattr(self,'_sequence_offset',0)
+            if getattr(self,'_source_epoch',None) not in (None,epoch):
+                offset=max(after,getattr(self,'_last_snapshot_sequence',-1))+1-int(capture_count)
+            sequence=int(capture_count)+offset
+            if sequence<=after:
+                return None
+            source_present_id,generation,completed,published=values[27:31]
             if roi_w <= 0 or roi_h <= 0 or roi_stride != roi_w * 4:
                 return None
             if roi_size != roi_stride * roi_h:
@@ -136,12 +256,17 @@ class VulkanCapture:
             raw = bytes(mm[roi_offset:end])
             seq2 = struct.unpack_from("=I", mm, 20)[0]
             if seq1 == seq2 and not (seq2 & 1):
+                self._source_epoch=epoch
+                self._sequence_offset=offset
+                self._last_snapshot_sequence=sequence
                 return dict(
-                    count=int(capture_count), timestamp_ns=int(capture_ts),
+                    count=sequence, native_count=int(capture_count), source_epoch=epoch,
+                    timestamp_ns=int(capture_ts),
+                    source_present_id=int(source_present_id),generation=int(generation),
+                    completed_ns=int(completed),published_ns=int(published),
                     source_size=(int(sw_width), int(sw_height)), format=int(sw_format),
                     roi=(int(roi_x), int(roi_y), int(roi_w), int(roi_h)), raw=raw,
                 )
-            time.sleep(0.001)
         return None
 
     @staticmethod
@@ -170,9 +295,9 @@ class VulkanCapture:
         pixels = np.frombuffer(snapshot["raw"], np.uint8).reshape(height, width, 4)
         vk_format = snapshot["format"]
         if vk_format in BGRA_FORMATS:
-            bgr = pixels[:, :, :3]
+            bgr = cv2.cvtColor(pixels,cv2.COLOR_BGRA2BGR)
         elif vk_format in RGBA_FORMATS:
-            bgr = pixels[:, :, [2, 1, 0]]
+            bgr = cv2.cvtColor(pixels,cv2.COLOR_RGBA2BGR)
         else:
             raise RuntimeError(f"Unsupported Vulkan swapchain format: {vk_format}")
 
@@ -182,10 +307,16 @@ class VulkanCapture:
         bgr.flags.writeable = False
         return bgr
 
+    def set_dispatch_deadline(self, deadline):
+        self.dispatch_deadline=deadline
+
     def next(self, after=-1, timeout=1.0):
+        if hasattr(self,'_lease_file'):
+            self._ensure_lease()
         deadline = time.monotonic() + timeout
+        fine_window=(.001 if timeout<=.001 or getattr(self,'dispatch_deadline',None) is not None else 0)
         while not self.stopping:
-            snapshot = self._snapshot()
+            snapshot = self._snapshot(after=after,deadline=deadline)
             if snapshot is not None and snapshot["count"] > after:
                 received = time.monotonic()
                 image = self._to_bgr(snapshot)
@@ -202,6 +333,11 @@ class VulkanCapture:
                     negotiated_caps=f"vulkan-format={snapshot['format']};raw-roi={snapshot['roi'][2]}x{snapshot['roi'][3]}",
                     worker_cpu_time_ns=None,
                     source_size=snapshot["source_size"],
+                    source_present_id=snapshot['source_present_id'],
+                    source_generation=snapshot['generation'],
+                    source_epoch=snapshot['source_epoch'],
+                    copy_completed_time=snapshot['completed_ns']/1e9,
+                    published_time=snapshot['published_ns']/1e9,
                 )
                 with self.cv:
                     self.latest = frame
@@ -210,19 +346,34 @@ class VulkanCapture:
             now = time.monotonic()
             if now >= deadline:
                 return None
-            # Runtime uses this timeout as a dispatch deadline. Never add a fixed
-            # 2 ms polling overshoot when the requested wake-up is sooner than
-            # the normal capture poll interval.
-            time.sleep(min(0.002, deadline - now))
+            # Leave the final millisecond to bounded polling: a submillisecond
+            # sleep can wake several milliseconds late under scheduler load.
+            # Longer capture waits still sleep to keep idle CPU use low.
+            remaining=deadline-now
+            if remaining>fine_window:
+                time.sleep(min(.002,remaining-fine_window))
         return None
 
     def close(self, *, fast=False):
         with self.cv:
             self.stopping = True
             self.cv.notify_all()
+        if getattr(self,'_status_thread',None) is not None:
+            self._status_stop.set()
+            self._status_thread.join(timeout=1)
+        if getattr(self,'_lease_thread',None) is not None:
+            self._lease_stop.set()
+            self._lease_thread.join(timeout=.5)
+        if getattr(self,'_lease_file',None) is not None:
+            try:
+                os.pwrite(self._lease_file.fileno(),struct.pack('=Q',0),8)
+            finally:
+                self._lease_file.close()
+                self._lease_file=None
         self._close_mapping()
 
     def __enter__(self):
+        self._ensure_lease()
         return self
 
     def __exit__(self, exc_type, *exc):

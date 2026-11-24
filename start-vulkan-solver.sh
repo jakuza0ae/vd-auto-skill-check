@@ -29,16 +29,18 @@ from tools.vulkan_layer_status import read_shm_header
 first = read_shm_header(shm_path)
 if not first or "error" in first:
     raise SystemExit(1)
-first_count = first.get("roi", {}).get("capture_count", 0)
-time.sleep(0.18)
+if first.get("version") != 3:
+    print("Нужен обновлённый Vulkan layer v3. Перезапусти Sober вручную через ./start-vulkan-sober.sh.",file=sys.stderr)
+    raise SystemExit(1)
+first_present = first.get("last_present_ns",0)
+time.sleep(1.1)
 second = read_shm_header(shm_path)
 if not second or "error" in second:
     raise SystemExit(1)
-second_count = second.get("roi", {}).get("capture_count", 0)
-raise SystemExit(0 if second_count > first_count else 1)
+raise SystemExit(0 if second.get("last_present_ns",0)>first_present else 1)
 PY
 then
-  printf '%s\n' 'Vulkan capture существует, но не обновляется. Sober не трогаю.' >&2
+  printf '%s\n' 'Vulkan layer устарел или не показывает новые кадры. Sober не трогаю.' >&2
   printf '%s\n' 'Если Sober был открыт обычным способом, закрой его вручную и запусти ./start-vulkan-sober.sh один раз.' >&2
   exit 2
 fi

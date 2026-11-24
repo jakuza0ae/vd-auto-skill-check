@@ -17,6 +17,8 @@ import threading
 
 import cv2
 
+from .image_io import read_image
+
 
 FORMAT='vd-video-v2'
 LEGACY_FORMAT='vd-roi-v1'
@@ -26,8 +28,11 @@ VIDEO_NAME='frames.mp4'
 def source_digest():
     root=Path(__file__).resolve().parents[1]
     digest=hashlib.sha256()
-    for path in sorted([root/'run.py',*root.glob('vd/*.py'),*root.glob('native/*.py')]):
-        digest.update(str(path.relative_to(root)).encode())
+    for path in sorted([root/'run.py',*root.glob('vd/*.py'),*root.glob('native/*.py'),
+                        *root.glob('native/*.cpp'),root/'run-vulkan.py',
+                        *root.glob('native/vulkan_layer/*.cpp'),
+                        *root.glob('native/vulkan_layer/*.h')]):
+        digest.update(path.relative_to(root).as_posix().encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -65,23 +70,33 @@ class Recorder:
         self.closed=False
         self.interrupted=False
         self.writer_proc=None
+        self._write_manifest(dict(self.metadata,complete=False,writer_complete=False,
+                                  recording_state='started'))
         self.thread=threading.Thread(target=self._write,name='VD-recording',daemon=True)
         self.thread.start()
+
+    def _write_manifest(self, metadata):
+        temporary=self.directory/'manifest.json.tmp'
+        temporary.write_text(json.dumps(metadata,indent=2)+'\n')
+        temporary.replace(self.directory/'manifest.json')
 
     def submit(self, frame, *, decision_time, held, state, events):
         if self.closed:
             raise RuntimeError('Recorder closed')
         if self.error:
             raise RuntimeError('Recorder failed: '+self.error)
-        if not self.record_video:
-            return True
         row=dict(sequence=frame.sequence,media_time=frame.media_time,
                  received_time=frame.received_time,consumed_time=frame.consumed_time,
                  timestamp_kind=frame.timestamp_kind,pts_ns=frame.pts_ns,
                  negotiated_caps=frame.negotiated_caps,synthetic=frame.synthetic,
-                 decision_time=decision_time,held=held,state=state,events=events)
+                 decision_time=decision_time,held=held,state=state,events=events,
+                 source_present_id=getattr(frame,'source_present_id',None),
+                 source_generation=getattr(frame,'source_generation',None),
+                 source_epoch=getattr(frame,'source_epoch',None),
+                 copy_completed_time=getattr(frame,'copy_completed_time',None),
+                 published_time=getattr(frame,'published_time',None))
         try:
-            self.queue.put_nowait((frame.image.copy(),row))
+            self.queue.put_nowait((frame.image.copy() if self.record_video else False,row))
         except queue.Full:
             self.dropped+=1
             return False
@@ -128,11 +143,12 @@ class Recorder:
         command += [str(self.directory/VIDEO_NAME)]
         proc=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,
                               stderr=subprocess.PIPE)
-        try:
-            os.setpriority(os.PRIO_PROCESS,proc.pid,
-                           max(os.getpriority(os.PRIO_PROCESS,proc.pid),10))
-        except ProcessLookupError:
-            pass
+        if hasattr(os,'setpriority'):
+            try:
+                os.setpriority(os.PRIO_PROCESS,proc.pid,
+                               max(os.getpriority(os.PRIO_PROCESS,proc.pid),10))
+            except OSError:
+                pass
         self.metadata['video_width']=width
         self.metadata['video_height']=height
         self.metadata['video_nominal_fps']=fps
@@ -153,6 +169,11 @@ class Recorder:
                         events.write(json.dumps(row,allow_nan=False,separators=(',',':'))+'\n')
                         events.flush()
                         self.events_written+=1
+                        continue
+                    if image is False:
+                        log.write(json.dumps(row,allow_nan=False,separators=(',',':'))+'\n')
+                        log.flush()
+                        self.written+=1
                         continue
                     if proc is None:
                         proc,shape=self._start_encoder(image)
@@ -232,7 +253,8 @@ class Recorder:
                     writer_complete=writer_complete,
                     complete=(writer_complete and not self.metadata.get('runtime_error')
                               and self.metadata.get('capture_sequences_skipped',0)==0))
-        (self.directory/'manifest.json').write_text(json.dumps(result,indent=2)+'\n')
+        result['recording_state']='closed'
+        self._write_manifest(result)
         if self.error:
             raise RuntimeError('Recorder failed: '+self.error)
 
@@ -250,7 +272,7 @@ def _read_legacy(directory):
             path=(directory/row['image']).resolve()
             if not path.is_relative_to(directory/'frames'):
                 raise ValueError('Image outside recording directory')
-            image=cv2.imread(str(path),cv2.IMREAD_COLOR)
+            image=read_image(path,cv2.IMREAD_COLOR)
             if image is None:
                 raise ValueError('Missing or invalid recording image: '+str(path))
             yield row,image

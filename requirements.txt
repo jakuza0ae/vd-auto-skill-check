@@ -1,5 +1,5 @@
-# Versions observed in the working environment; GI/DBus use system Python.
+# GI/DBus for Linux portal capture use system Python.
 numpy==2.5.3
 opencv-python-headless==5.0.0.93
-evdev==2.0.0
+evdev==2.0.0; sys_platform == "linux"
 pytest==9.1.1

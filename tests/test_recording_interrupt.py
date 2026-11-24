@@ -1,10 +1,42 @@
 import json
 import time
+from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 
 from vd.recording import Recorder, read_recording
+
+
+def test_legacy_recording_reads_unicode_image_path(tmp_path):
+    images = tmp_path / 'frames'
+    images.mkdir()
+    image = np.full((12, 12, 3), (31, 97, 153), dtype=np.uint8)
+    ok, encoded = cv2.imencode('.png', image)
+    assert ok
+    (images / 'кадр.png').write_bytes(encoded.tobytes())
+    (tmp_path / 'manifest.json').write_text('{"format":"vd-roi-v1"}')
+    (tmp_path / 'frames.jsonl').write_text(json.dumps({'image': 'frames/кадр.png'}) + '\n')
+
+    [(row, decoded)] = read_recording(tmp_path)
+
+    assert row['image'] == 'frames/кадр.png'
+    np.testing.assert_array_equal(decoded, image)
+
+
+def test_video_encoder_starts_without_unix_process_priority(monkeypatch, tmp_path):
+    monkeypatch.delattr('vd.recording.os.setpriority', raising=False)
+    recorder = Recorder.__new__(Recorder)
+    recorder.directory = tmp_path
+    recorder.ffmpeg = 'ffmpeg'
+    recorder.video_codec = 'libx264'
+    recorder.metadata = {'requested_fps': 120}
+    process = SimpleNamespace(pid=1)
+    monkeypatch.setattr('vd.recording.subprocess.Popen', lambda *args, **kwargs: process)
+
+    assert recorder._start_encoder(np.zeros((32, 64, 3), dtype=np.uint8)) == (process, (32, 64))
+    assert recorder.metadata['video_nominal_fps'] == 120
 
 
 def test_ctrl_c_marks_recording_partial_and_returns_quickly(tmp_path):
@@ -70,8 +102,26 @@ def test_events_only_recording_skips_frame_copy_and_video_encoder(tmp_path, monk
     events = [json.loads(line) for line in
               (tmp_path / "events-only" / "events.jsonl").read_text().splitlines()]
     assert manifest["video_recorded"] is False
-    assert manifest["frames_written"] == 0
+    assert manifest["frames_written"] == 1
+    rows=[json.loads(line) for line in (tmp_path/"events-only"/"frames.jsonl").read_text().splitlines()]
+    assert len(rows)==1 and rows[0]["sequence"]==1
+    assert rows[0]["state"]=={}
     assert manifest["events_written"] == 1
     assert events == [{"kind": "KEYDOWN", "generation": 1}]
     with pytest.raises(ValueError, match="events-only recording"):
         list(read_recording(tmp_path / "events-only"))
+
+
+def test_manifest_retains_configuration_before_a_session_can_be_force_stopped(tmp_path):
+    recorder=Recorder(tmp_path/'durable',metadata={'lead_seconds':.004},record_video=False)
+    try:
+        metadata=json.loads((tmp_path/'durable'/'manifest.json').read_text())
+        assert metadata['lead_seconds']==.004
+        assert metadata['source_sha256']
+        assert metadata['recording_state']=='started'
+        assert metadata['complete'] is False
+    finally:
+        recorder.close()
+    metadata=json.loads((tmp_path/'durable'/'manifest.json').read_text())
+    assert metadata['recording_state']=='closed'
+    assert metadata['complete'] is True

@@ -185,7 +185,7 @@ def test_synthetic_bench_frames_drive_detector_motion_and_one_planner_claim():
     assert kinds.count('BEGIN') == 1
     assert kinds.count('PRESS_CLAIM') == 1
     claim = next(event for event in events if event['kind'] == 'PRESS_CLAIM')
-    assert claim['plan']['target_grade'] in ('GREAT', 'GOOD')
+    assert claim['plan']['target_grade']=='GREAT'
 
 
 def test_continuous_frenzy_ring_gets_two_success_claims():
@@ -211,7 +211,7 @@ def test_continuous_frenzy_ring_gets_two_success_claims():
             target=160
     claims=[e for e in events if e['kind']=='PRESS_CLAIM']
     assert len(claims)==2
-    assert all(e['plan']['target_grade'] in ('GREAT','GOOD') for e in claims)
+    assert all(e['plan']['target_grade']=='GREAT' for e in claims)
 
 
 @pytest.mark.parametrize('speed', [278, 500, 750, 1000, 1300, 1500])
@@ -220,6 +220,7 @@ def test_twenty_continuous_frenzy_checks_have_no_miss(speed, fps):
     detector=Detector()
     engine=Engine(lead_seconds=.035,lead_uncertainty=.020)
     target=40
+    initial_angle=210
     next_target_at=None
     claims=[]
     outcomes=[]
@@ -227,13 +228,10 @@ def test_twenty_continuous_frenzy_checks_have_no_miss(speed, fps):
     for index in range(fps*60):
         at=index/fps
         if next_target_at is not None and at>=next_target_at:
-            # Keep the next geometry on the same physical sweep but still
-            # ahead of the needle at 1500 deg/s. A +150 degree shift becomes
-            # physically stale at high speed and only passed under the old
-            # forbidden +360 re-arm behavior.
+            # A +330 degree transition keeps the next white ahead on this sweep.
             target=(target+330)%360
             next_target_at=None
-        angle=(270+speed*at)%360
+        angle=(initial_angle+speed*at)%360
         measured=detector.measure(bench_frame((160,162.5),angle,target),at,
                                   center_hint=engine.center)
         measured=retained_target(measured,great=engine.target,good=engine.good,
@@ -247,7 +245,7 @@ def test_twenty_continuous_frenzy_checks_have_no_miss(speed, fps):
         for event in engine.take_events():
             if event['kind']=='PRESS_CLAIM':
                 claims.append(event)
-                impact=(270+speed*(event['at']+.035))%360
+                impact=(initial_angle+speed*(event['at']+.035))%360
                 great=Arc(target,10).contains(impact)
                 good=Arc(target+11,42).contains(impact)
                 success=great or good
@@ -260,8 +258,11 @@ def test_twenty_continuous_frenzy_checks_have_no_miss(speed, fps):
             break
     assert len(claims)==20
     assert len({event['generation'] for event in claims})==20
-    assert all(event['plan']['target_grade'] in ('GREAT','GOOD') for event in claims)
-    assert all(event['plan']['timing_mode']=='PREDICTED' for event in claims)
+    assert all(event['plan']['target_grade'] == 'GREAT' for event in claims)
+    assert all(event['plan']['timing_mode']=='PREDICTED'
+               or (event['plan']['timing_mode']=='LAST_CHANCE'
+                   and event['plan']['fallback_reason']=='CENTER_PASSED'
+                   and event['plan']['press_at']==event['at']) for event in claims)
     assert outcomes==[True]*20
 
 
@@ -294,10 +295,12 @@ def test_late_frenzy_geometry_does_not_rearm_another_revolution():
                 claims.append(event)
                 if len(claims)==1:
                     next_target_at=event['at']+.035+.15
-        if changed and engine.generation>=2 and engine.planner.reason=='TARGET_PASSED':
+        if changed and engine.generation>=2 and engine.planner.fired:
             break
 
     assert changed
     assert engine.generation==2
-    assert len(claims)==1
-    assert engine.planner.reason=='TARGET_PASSED'
+    assert len(claims)==2
+    assert [event['generation'] for event in claims]==[1,2]
+    assert claims[-1]['plan']['timing_mode']=='LAST_CHANCE'
+    assert claims[-1]['plan']['target_grade']=='GREAT'

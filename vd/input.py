@@ -3,7 +3,6 @@
 This module is only used by explicit ``run`` mode. It does not inspect or
 communicate with the game process; mouse state comes from normal input events.
 """
-from dataclasses import dataclass
 from pathlib import Path
 import threading
 import time
@@ -11,13 +10,7 @@ import time
 import evdev
 from evdev import ecodes as e
 
-
-@dataclass(frozen=True)
-class MouseState:
-    held: bool
-    healthy: bool
-    device: str | None
-    error: str | None
+from .input_state import Keydown, MouseState
 
 
 class MouseMonitor:
@@ -91,12 +84,6 @@ class MouseMonitor:
 
     def __exit__(self, *_):
         self.close()
-
-
-@dataclass(frozen=True)
-class Keydown:
-    requested_at: float
-    syn_completed_at: float
 
 
 class SpaceOutput:

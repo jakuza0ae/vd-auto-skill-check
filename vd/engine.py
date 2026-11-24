@@ -8,17 +8,15 @@ from dataclasses import asdict
 import math
 
 from vd.motion import MotionTracker, delta
-from vd.planning import Planner
+from vd.planning import Planner, DEFAULT_RESPONSE_DELAY_SECONDS
 from vd.vision import same_arc
 
 
 CHAIN_FAST_SHIFT_DEGREES=25
-BLIND_INITIAL_DELAY=.30
-BLIND_STALL_DELAY=.15
 
 
 class Engine:
-    def __init__(self, *, lead_seconds=.035, lead_uncertainty=.020,
+    def __init__(self, *, lead_seconds=DEFAULT_RESPONSE_DELAY_SECONDS, lead_uncertainty=.020,
                  absence_seconds=.12):
         self.planner=Planner(lead_seconds=lead_seconds,lead_uncertainty=lead_uncertainty)
         self.motion=MotionTracker()
@@ -32,6 +30,7 @@ class Engine:
         self.last_visible=None
         self.last_timestamp=None
         self.started_at=None
+        self.attempt_at=None
         self.last_reliable_motion_at=None
         self.chain=0
         self.reason='WAITING_FOR_RING'
@@ -77,12 +76,14 @@ class Engine:
         self.last_visible=None
         self.last_reliable_motion_at=None
         self.motion.reset()
+        self.attempt_at=None
         self.chain=0
 
     def observe(self, m, *, now, held=True):
         if not math.isfinite(now):
             raise ValueError('Non-finite decision time')
         if self.last_timestamp is not None and m.timestamp<=self.last_timestamp:
+            self.motion.reset_fit()
             self.planner.invalidate('NONINCREASING_TIME')
             self.reason='NONINCREASING_TIME'
             return
@@ -91,6 +92,8 @@ class Engine:
             self.cancel('LMB_RELEASED',now)
             return
         if m.timestamp>now+.002 or now-m.timestamp>self.planner.max_age:
+            self.motion.reset_fit()
+            self.planner.invalidate('STALE_FRAME')
             self.reason='STALE_FRAME'
             return
         visible=m.prompt_score>=.80 and m.center is not None and m.great is not None
@@ -98,7 +101,12 @@ class Engine:
             self.pending=None
             self.pending_at=None
             self.motion.update(m.timestamp,())
+            self.planner.invalidate('RING_NOT_VISIBLE')
             self.reason='RING_NOT_VISIBLE'
+            if self.active and not self.planner.fired:
+                self.planner.attempt_now(frame_at=m.timestamp,now=now,reason='RING_DISAPPEARING')
+                self.reason='LAST_CHANCE'
+                return
             if self.last_visible is not None and m.timestamp-self.last_visible>=self.absence_seconds:
                 self.cancel('RING_ENDED',now)
             return
@@ -106,6 +114,10 @@ class Engine:
         shifted=(not self.active or not same_arc(self.target,m.great)
                  or math.dist(self.center,m.center)>3)
         if shifted:
+            if self.active and not self.planner.fired:
+                self.planner.attempt_now(frame_at=m.timestamp,now=now,reason='GEOMETRY_CHANGED')
+                self.reason='LAST_CHANCE'
+                return
             self.reason='CONFIRMING_GEOMETRY'
             previous_target=self.target
             previous_occurrence=self.planner.occurrence
@@ -158,44 +170,46 @@ class Engine:
                 self.last_reliable_motion_at=None
             self.active=True
             self.started_at=m.timestamp
+            self.attempt_at=now+.300
             self.pending=None
             self.pending_at=None
             self.emit('BEGIN',now,target=asdict(m.great))
         else:
             self.pending=None
             self.pending_at=None
-        previous_motion_frame=self.motion.last_frame
-        capture_gap=(previous_motion_frame is not None
-                     and m.timestamp-previous_motion_frame>self.motion.max_gap)
+        self.motion.white_width=self.target.width
         estimate=self.motion.update(m.timestamp,m.candidates)
-        if capture_gap:
-            self.last_reliable_motion_at=m.timestamp
         if estimate is not None:
             self.last_reliable_motion_at=estimate.last_motion_at
         if self.planner.fired:
             self.reason='OBSERVING_AFTER_PRESS'
             return
         plan=self.planner.update(estimate,frame_at=m.timestamp,now=now)
-        if plan is None and self.planner.current is None:
-            if self.last_reliable_motion_at is None:
-                reference_at=self.started_at
-                delay=BLIND_INITIAL_DELAY
-            else:
-                reference_at=self.last_reliable_motion_at
-                delay=BLIND_STALL_DELAY
-            if m.timestamp-reference_at>=delay:
-                mode='BLIND_NO_NEEDLE' if not m.candidates else 'BLIND_NO_MOTION'
-                plan=self.planner.attempt_now(frame_at=m.timestamp,now=now,
-                                              timing_mode=mode)
         self.reason=self.planner.reason if estimate is not None else self.motion.reason
         if plan:
+            self.attempt_at=plan.press_at
             self.reason=plan.timing_mode
+        elif self.attempt_at is not None and now>=self.attempt_at:
+            self.planner.attempt_now(frame_at=m.timestamp,now=now,reason=self.motion.reason)
+            self.reason='LAST_CHANCE'
 
     def poll(self, now, *, held=True, capture_alive=True):
         if not held or not capture_alive:
             self.cancel('LMB_RELEASED' if not held else 'CAPTURE_LOST',now)
             return None
         plan=self.planner.current
+        if (plan is None and self.active and not self.planner.fired
+                and self.attempt_at is not None and now>=self.attempt_at
+                and self.last_timestamp is not None):
+            plan=self.planner.attempt_now(frame_at=self.last_timestamp,now=now,
+                reason='TRACKING_UNAVAILABLE')
+        if plan is not None and now>plan.latest_press_at and now<=plan.valid_until:
+            frame_at=self.last_timestamp if self.last_timestamp is not None else plan.valid_until-self.planner.max_age
+            plan=self.planner.update(self.motion.estimate,frame_at=frame_at,now=now)
+            if plan is None:
+                plan=self.planner.attempt_now(frame_at=frame_at,now=now,reason='DEADLINE_MISSED')
+            if plan is not None:
+                self.attempt_at=plan.press_at
         if plan is not None and now>plan.valid_until:
             self.planner.invalidate('OBSERVATION_EXPIRED')
             self.reason='OBSERVATION_EXPIRED'
@@ -212,6 +226,7 @@ class Engine:
 
     def snapshot(self):
         return dict(generation=self.generation,chain=self.chain,active=self.active,
+                    fallback_press_at=self.attempt_at,
                     lead_seconds=self.planner.lead,lead_uncertainty=self.planner.lead_uncertainty,
                     reason=self.reason,motion_reason=self.motion.reason,
                     motion=asdict(self.motion.estimate) if self.motion.estimate else None,

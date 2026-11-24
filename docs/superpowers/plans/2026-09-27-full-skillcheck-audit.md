@@ -31,7 +31,7 @@
 
 ### Task 1: Complete replay corpus and video evidence audit
 
-**Files:** `tools/audit_replay_corpus.py`, `tools/audit_replay_archives.py`, `tools/audit_replay_videos.py`; reports under `/home/oae/skillcheck_replays_archive_reports/`.
+**Files:** `tools/audit_replay_corpus.py`, `tools/audit_replay_archives.py` and `tools/audit_replay_videos.py`. The audit reports are stored locally outside the checkout.
 
 - [ ] Finish reconciling raw path counts for all JSON, MP4, MKV, and ZIP sources; current unique JSON hashes/geometry match the prior 2,803 records, but the fresh scan has 93 fewer raw JSON paths than the older inventory.
 - [x] Decode every unique replay MP4 and every available screen-session MKV; retain per-file failures and source provenance.

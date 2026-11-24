@@ -25,16 +25,15 @@ def test_ambiguous_red_candidates_still_get_a_success_attempt():
     engine.observe(ambiguous(1.0,70),now=1.0)
     engine.observe(ambiguous(1.02,76),now=1.02)
     engine.observe(ambiguous(1.04,82),now=1.04)
-    engine.observe(ambiguous(1.06,88),now=1.06)
 
     plan=engine.planner.current
     assert engine.active
     assert plan is not None
-    assert plan.target_grade in ('GREAT','GOOD')
+    assert plan.target_grade=='GREAT'
     assert engine.poll(plan.press_at+.001) is plan
 
 
-def test_visible_check_without_needle_gets_one_blind_attempt_after_startup_grace():
+def test_visible_check_without_needle_still_gets_one_attempt():
     engine=Engine(lead_seconds=.06,lead_uncertainty=.015)
 
     def no_needle(at):
@@ -49,12 +48,9 @@ def test_visible_check_without_needle_gets_one_blind_attempt_after_startup_grace
     assert engine.active
     assert engine.planner.current is None
     engine.observe(no_needle(1.321),now=1.321)
-    plan=engine.planner.current
-    assert plan is not None
-    assert plan.timing_mode=='BLIND_NO_NEEDLE'
-    assert plan.target_grade=='GREAT'
-    assert engine.poll(1.321) is plan
-    assert engine.poll(1.321) is None
+    assert engine.planner.current.timing_mode=='LAST_CHANCE'
+    assert engine.poll(1.321) is not None
+    assert engine.poll(1.322) is None
 
 
 def test_small_startup_angle_jitter_does_not_trigger_blind_attempt_before_motion():
@@ -71,11 +67,13 @@ def test_small_startup_angle_jitter_does_not_trigger_blind_attempt_before_motion
     assert engine.planner.current is None
 
     engine.observe(measurement(1.25,angle=75.5,great=great),now=1.25)
+    assert engine.planner.current is None
+    engine.observe(measurement(1.27,angle=81.5,great=great),now=1.27)
     assert engine.planner.current is not None
     assert engine.planner.current.timing_mode=='PREDICTED'
 
 
-def test_visible_check_with_stalled_needle_gets_blind_attempt_after_motion_expires():
+def test_visible_check_with_stalled_needle_waits_for_motion():
     engine=Engine(lead_seconds=.06,lead_uncertainty=.015)
 
     engine.observe(measurement(1.0,angle=70),now=1.0)
@@ -85,30 +83,20 @@ def test_visible_check_with_stalled_needle_gets_blind_attempt_after_motion_expir
     for at in (1.10,1.14,1.18,1.22):
         engine.observe(measurement(at,angle=76),now=at)
         if at<1.21:
-            plan=engine.planner.current
-            assert plan is None or plan.timing_mode!='BLIND_NO_MOTION'
-
-    plan=engine.planner.current
-    assert plan is not None
-    assert plan.timing_mode=='BLIND_NO_MOTION'
-    assert engine.poll(1.22) is plan
+            assert engine.planner.current is None
+    assert engine.poll(1.22) is None
 
 
-def test_one_second_capture_gap_restarts_motion_grace_and_reacquires_before_fallback():
+def test_one_second_capture_gap_uses_fresh_frame_for_one_best_effort_attempt():
     engine=Engine(lead_seconds=.035,lead_uncertainty=.020)
     great=Arc(96,10)
-
     for at,angle in ((1.0,70),(1.02,72),(1.04,74),(1.06,76)):
         engine.observe(measurement(at,angle=angle,great=great),now=at)
-
     engine.observe(measurement(2.10,angle=76,great=great),now=2.10)
-    assert engine.planner.current is None
-    engine.observe(measurement(2.12,angle=82,great=great),now=2.12)
-
-    plan=engine.planner.current
-    assert plan is not None
-    assert plan.timing_mode=='PREDICTED'
-    assert plan.target_grade in ('GREAT','GOOD')
+    assert engine.motion.estimate is None
+    assert engine.planner.current.timing_mode=='LAST_CHANCE'
+    assert engine.poll(2.10) is not None
+    assert engine.poll(2.11) is None
 
 
 def test_delayed_static_frame_discards_stale_prediction_then_reacquires_motion():
@@ -144,6 +132,7 @@ def test_slow_observed_needle_does_not_trigger_start_age_blind_press():
     assert engine.active
     assert engine.planner.current is None
     engine.observe(measurement(1.22,angle=75.28,great=great),now=1.22)
+    engine.observe(measurement(1.26,angle=76.24,great=great),now=1.26)
 
     assert engine.planner.current is not None
     assert engine.planner.current.timing_mode=='PREDICTED'
@@ -159,6 +148,7 @@ def test_confirmed_prompt_starts_check_and_brief_prompt_loss_uses_absence_grace(
     engine.observe(measurement(1.05, prompt=.66, angle=82, great=Arc(120, 10)), now=1.05)
     assert engine.active
     assert engine.target == Arc(96, 10)
+    assert engine.poll(1.05).timing_mode=='LAST_CHANCE'
 
     engine.observe(measurement(1.15, prompt=.66, angle=105), now=1.15)
     assert not engine.active

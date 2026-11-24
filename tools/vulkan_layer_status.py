@@ -10,10 +10,9 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_SOBER_DATA = Path(os.environ.get("HOME", "/home/oae")) / ".var" / "app" / "org.vinegarhq.Sober" / "data"
-DEFAULT_VULKAN_DIR = DEFAULT_SOBER_DATA / "vulkan"
+SOBER_VULKAN_DIR = Path(".var/app/org.vinegarhq.Sober/data/vulkan")
 SHM_MAGIC = 0x56444C59
-HEADER_FORMAT = "=IIIIIIQQQfIIIIIII64sIIIIIII4xQQ112s"
+HEADER_FORMAT = "=IIIIIIQQQfIIIIIII64sIIIIIII4xQQQQQQ80s"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 
 
@@ -28,7 +27,7 @@ def _decode_header(data: bytes):
         proc_name_raw,
         roi_x, roi_y, roi_width, roi_height, roi_stride, roi_offset, roi_size,
         roi_capture_count, roi_capture_ts,
-        _padding,
+        source_present_id,swapchain_generation,copy_completed_ns,published_ns,_padding,
     ) = values
     if magic != SHM_MAGIC:
         return None
@@ -53,6 +52,10 @@ def _decode_header(data: bytes):
             "image_count": sw_img_count,
             "current_image_index": sw_cur_idx,
         },
+        "source_present_id": source_present_id,
+        "swapchain_generation": swapchain_generation,
+        "copy_completed_ns": copy_completed_ns,
+        "published_ns": published_ns,
         "roi": {
             "x": roi_x,
             "y": roi_y,
@@ -77,8 +80,27 @@ def read_shm_header(shm_path: Path):
         return {"error": str(exc)}
 
 
+def _home_directory() -> Path:
+    if os.name == "posix" and not os.environ.get("HOME"):
+        from pwd import getpwuid
+
+        try:
+            home = getpwuid(os.getuid()).pw_dir
+        except KeyError as exc:
+            raise RuntimeError("Cannot resolve the home directory") from exc
+        if not home:
+            raise RuntimeError("Cannot resolve the home directory")
+        return Path(home)
+    return Path.home()
+
+
 def extension_installed() -> bool:
-    root = Path.home() / ".local/share/flatpak/extension/org.freedesktop.Platform.VulkanLayer.VDCapture"
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    try:
+        data_dir = Path(xdg_data) if xdg_data else _home_directory() / ".local/share"
+    except RuntimeError:
+        return False
+    root = data_dir / "flatpak/extension/org.freedesktop.Platform.VulkanLayer.VDCapture"
     return any(root.glob("*/**/share/vulkan/implicit_layer.d/VkLayer_VD_capture.json")) if root.exists() else False
 
 
@@ -168,10 +190,15 @@ def watch_status(vulkan_dir: Path, interval: float):
 
 def main():
     parser = argparse.ArgumentParser(description="Inspect VD Vulkan layer status")
-    parser.add_argument("--dir", type=Path, default=DEFAULT_VULKAN_DIR)
+    parser.add_argument("--dir", type=Path)
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--interval", type=float, default=0.5)
     args = parser.parse_args()
+    if args.dir is None:
+        try:
+            args.dir = _home_directory() / SOBER_VULKAN_DIR
+        except RuntimeError:
+            parser.error("Cannot resolve the home directory. Specify the capture directory with --dir.")
     if args.watch:
         watch_status(args.dir, args.interval)
     else:

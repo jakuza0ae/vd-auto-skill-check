@@ -17,9 +17,18 @@ def test_browser_bench_renders_a_detectable_check(tmp_path):
     if browser is None:
         pytest.skip('Chromium is not installed')
     screenshot=tmp_path/'bench.png'
+    # This is a static pixel/geometry check. A live RAF can cover white with the
+    # needle at the screenshot instant; animation behavior has separate tests.
+    html=BENCH.read_text()
+    assert 'requestAnimationFrame(tick);' in html
+    html=html.replace('requestAnimationFrame(tick);','')
+    html=html.replace('../assets/space_template.png',
+        (BENCH.parent.parent/'assets/space_template.png').as_uri())
+    fixture=tmp_path/'static-bench.html'
+    fixture.write_text(html)
     subprocess.run([browser,'--headless','--no-sandbox','--disable-gpu',
         '--hide-scrollbars','--window-size=1920,1080','--virtual-time-budget=700',
-        f'--screenshot={screenshot}',BENCH.as_uri()],check=True,
+        f'--screenshot={screenshot}',fixture.as_uri()],check=True,
         stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=20)
     frame=cv2.imread(str(screenshot))[420:660,800:1120]
     m=Detector().measure(frame,1.)

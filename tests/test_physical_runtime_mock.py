@@ -496,7 +496,7 @@ def test_dispatch_never_pulses_if_capture_or_mouse_source_is_unhealthy():
     assert output.pulses == 0
 
 
-def test_dispatch_sends_blind_attempt_after_startup_grace_and_marks_timing_unknown():
+def test_dispatch_sends_one_best_effort_attempt_after_startup_grace():
     engine=Engine(lead_seconds=.06,lead_uncertainty=.015)
     for at in (1.0,1.02):
         engine.observe(Measurement(at,(160,162.5),.99,Arc(96,10),Arc(107,42),(),
@@ -528,14 +528,11 @@ def test_dispatch_sends_blind_attempt_after_startup_grace_and_marks_timing_unkno
     result=dispatch(engine,capture,8,mouse=DispatchMouse(held=True),output=output,
                     clock=lambda:at)
     events=engine.take_events()
-    keydown=next(event for event in events if event['kind']=='KEYDOWN')
-
-    assert result is not None
-    assert result.timing_mode=='BLIND_NO_NEEDLE'
+    assert result.timing_mode=='LAST_CHANCE'
     assert output.pulses==1
-    assert keydown['outside_target_window'] is None
-    assert keydown['motion_diagnostics']['reason']=='NO_NEEDLE'
-    assert keydown['motion_diagnostics']['samples']==0
+    assert any(event['kind']=='KEYDOWN' for event in events)
+    assert dispatch(engine,capture,8,mouse=DispatchMouse(held=True),output=output,clock=lambda:at+.001) is None
+    assert output.pulses==1
 
 
 def test_released_mouse_skips_expensive_detector(monkeypatch, tmp_path):
@@ -561,3 +558,42 @@ def test_released_mouse_records_only_a_sparse_idle_sample(monkeypatch, tmp_path)
     manifest=json.loads((directory/'manifest.json').read_text())
     assert result['frames']>4
     assert manifest['frames_written']==1
+
+
+def test_dispatch_rechecks_native_source_identity_after_mouse_snapshot():
+    engine=planned_engine()
+    output=DispatchOutput()
+    capture=DispatchCapture()
+    native_changed=False
+    capture.prediction_current=lambda _:not native_changed
+    class Mouse(DispatchMouse):
+        def snapshot(self):
+            nonlocal native_changed
+            native_changed=True
+            return super().snapshot()
+    assert dispatch(engine,capture,7,mouse=Mouse(),output=output,clock=lambda:1.) is None
+    assert output.pulses==0
+    assert not engine.planner.fired
+    assert engine.planner.current is not None
+    assert engine.reason=='NEW_FRAME_PENDING'
+
+
+def test_confirmation_frame_telemetry_is_kept_without_video(monkeypatch,tmp_path):
+    class RingDetector:
+        roi_offset=(0,0)
+        def __init__(self,**_):
+            pass
+        def measure(self,image,timestamp,**_):
+            return Measurement(timestamp,(160,162.5),.99,Arc(130,10),Arc(141,42),
+                (Needle(30,80,.9,30,2),),'OK')
+    monkeypatch.setattr('vd.runtime.PortalCapture',FakeCapture)
+    monkeypatch.setattr('vd.runtime.Detector',RingDetector)
+    directory=tmp_path/'confirm-telemetry'
+    run_session(seconds=.035,synthetic=False,fps=60,directory=directory,
+        lead_seconds=.035,lead_uncertainty=.020,physical=False,video_recording=False)
+    rows=[json.loads(line) for line in (directory/'frames.jsonl').read_text().splitlines()]
+    assert rows
+    assert rows[0]['state']['reason']=='CONFIRMING_GEOMETRY'
+    assert rows[0]['state']['measurement']['great']['start']==130
+    assert rows[0]['state']['timing_components']['response_delay']==.035
+    assert not (directory/'frames.mp4').exists()

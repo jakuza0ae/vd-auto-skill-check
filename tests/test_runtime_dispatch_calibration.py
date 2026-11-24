@@ -154,3 +154,41 @@ def test_runtime_learns_scheduler_late_dispatch_when_plan_deadline_was_clean(mon
     assert observed[0]['physical'] is True
     assert observed[0]['dispatch_lag'] == pytest.approx(.008, abs=1e-9)
     assert observed[0]['eligible'] is True
+
+
+@pytest.mark.parametrize('learning',[True,False])
+def test_response_baseline_is_never_replaced_by_dispatch_learning(monkeypatch,tmp_path,learning,capsys):
+    captured=[]
+    emitted=0
+    def fake_dispatch(engine,capture,sequence,**_):
+        nonlocal emitted
+        captured.append(engine)
+        if emitted>=3:
+            return
+        intended=time.monotonic()
+        lag=(.003,.005,.004)[emitted]
+        emitted+=1
+        engine.emit('KEYDOWN',intended+lag,requested_at=intended,
+            plan=dict(press_at=intended,intended_press_at=intended,timing_mode='PREDICTED'),
+            frame_at=intended,prefire_motion=None)
+    monkeypatch.setattr('vd.runtime.PortalCapture',_Capture)
+    monkeypatch.setattr('vd.runtime.Detector',_BlankDetector)
+    monkeypatch.setattr('vd.runtime.dispatch',fake_dispatch)
+    monkeypatch.setattr(vd_input,'MouseMonitor',_HeldMouse)
+    monkeypatch.setattr(vd_input,'SpaceOutput',_Output)
+    run_session(seconds=.04,synthetic=False,fps=60,directory=tmp_path/'baseline',
+        lead_seconds=.035,lead_uncertainty=.020,physical=True,learn_lead=learning,
+        recording=False,video_recording=False)
+    assert emitted==3
+    planner=captured[-1].planner
+    assert planner.lead==pytest.approx(.039 if learning else .035)
+    assert planner.lead_uncertainty==pytest.approx(.023 if learning else .020)
+
+    import json
+    events=[json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith('{')]
+    keys=[event for event in events if event.get('kind')=='KEYDOWN']
+    parts=keys[-1]['timing_components']
+    assert parts['response_delay']==.035
+    assert parts['estimated_dispatch_delay']==pytest.approx(.004)
+    assert parts['dispatch_delay']==pytest.approx(.004 if learning else 0)
+    assert parts['dispatch_uncertainty']==pytest.approx(.003 if learning else 0)

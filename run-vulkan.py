@@ -9,6 +9,7 @@ from pathlib import Path
 import vd.runtime as runtime
 from vd.vulkan_capture import VulkanCapture
 
+from vd.planning import DEFAULT_RESPONSE_DELAY_SECONDS
 
 VARIANTS = {
     "baseline": (60, 5),
@@ -44,8 +45,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="VD solver using Sober Vulkan shared-memory capture")
     parser.add_argument("--seconds", type=float)
     parser.add_argument("--variant", choices=VARIANTS, default="quiet")
-    parser.add_argument("--lead-ms", type=float, default=35)
-    parser.add_argument("--lead-uncertainty-ms", type=float, default=20)
+    parser.add_argument("--lead-ms", "--response-delay-ms", type=float, default=DEFAULT_RESPONSE_DELAY_SECONDS*1000)
+    parser.add_argument("--lead-uncertainty-ms", "--response-uncertainty-ms", type=float, default=20)
     parser.add_argument("--recording", type=Path)
     parser.add_argument("--no-learn-lead", action="store_true")
     parser.add_argument("--video", action="store_true")

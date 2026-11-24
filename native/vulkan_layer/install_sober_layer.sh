@@ -41,8 +41,8 @@ printf '[INSTALL] Extension root: %s\n' "$ext_root"
 
 "$script_dir/build_layer.sh"
 mkdir -p "$lib_dir" "$ext_manifest_dir" "$app_manifest_dir"
-cp -f "$root/build/vulkan-layer/libVkLayer_VD_capture.so" "$lib_dir/libVkLayer_VD_capture.so"
-chmod 755 "$lib_dir/libVkLayer_VD_capture.so"
+install -m 755 "$root/build/vulkan-layer/libVkLayer_VD_capture.so" "$lib_dir/.libVkLayer_VD_capture.so.new"
+mv -f "$lib_dir/.libVkLayer_VD_capture.so.new" "$lib_dir/libVkLayer_VD_capture.so"
 
 # Keep a copy in the extension for documentation/future runtimes that honor merge-dirs.
 sed "s|@LAYER_LIBRARY_PATH@|$internal_lib|g" "$script_dir/VkLayer_VD_capture.json.in" > "$ext_manifest_dir/VkLayer_VD_capture.json"

@@ -114,6 +114,27 @@ def arcs_from_score(score, minimum, maximum):
     return result
 
 
+def _half_size(image):
+    height, width = image.shape
+    return cv2.resize(image, (round(width * .5), round(height * .5)),
+                      interpolation=cv2.INTER_AREA)
+
+
+class _PromptFrame:
+    def __init__(self, frame, timestamp):
+        if not math.isfinite(timestamp):
+            raise ValueError('Frame timestamp must be finite')
+        if frame.ndim != 3 or frame.shape[2] != 3 or frame.dtype != np.uint8:
+            raise ValueError('Expected uint8 BGR image')
+        self.gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self.half_gray = None
+
+    def reduced(self):
+        if self.half_gray is None:
+            self.half_gray = _half_size(self.gray)
+        return self.half_gray
+
+
 class Detector:
     def __init__(self, template=None, ring_radius=66.0, *, roi_offset=(0, 0),
                  ui_scale=1.0):
@@ -138,6 +159,8 @@ class Detector:
             templates.append(prompt)
         self.templates = tuple(templates)
         self.template = self.templates[0]
+        self._half_templates = tuple(_half_size(prompt) if min(prompt.shape) > 1 else None
+                                     for prompt in self.templates)
         self.ring_radius = float(ring_radius)*self.ui_scale
         self.roi_offset = tuple(roi_offset)
         self.angles = np.arange(720, dtype=np.float32) * (math.pi / 360)
@@ -161,13 +184,9 @@ class Detector:
         return cv2.remap(frame, x, y, cv2.INTER_LINEAR,
                          borderMode=cv2.BORDER_CONSTANT).astype(np.float32)
 
-    def _search_full(self, gray, template):
+    def _search_full(self, gray, small, template, small_template):
         height,width=gray.shape
         th,tw=template.shape
-        small=cv2.resize(gray,(round(width*.5),round(height*.5)),
-                         interpolation=cv2.INTER_AREA)
-        small_template=cv2.resize(template,(round(tw*.5),round(th*.5)),
-                                  interpolation=cv2.INTER_AREA)
         result=cv2.matchTemplate(small,small_template,cv2.TM_CCOEFF_NORMED)
         _,coarse,_,location=cv2.minMaxLoc(result)
         if coarse<.65:
@@ -182,11 +201,10 @@ class Detector:
         return float(score),(x0+location[0],y0+location[1])
 
     def measure(self, frame, timestamp, *, center_hint=None):
-        if not math.isfinite(timestamp):
-            raise ValueError('Frame timestamp must be finite')
-        if frame.ndim != 3 or frame.shape[2] != 3 or frame.dtype != np.uint8:
-            raise ValueError('Expected uint8 BGR image')
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return self._measure(frame, timestamp, _PromptFrame(frame, timestamp), center_hint)
+
+    def _measure(self, frame, timestamp, prompt, center_hint):
+        gray = prompt.gray
         th, tw = self.template.shape
         h, w = gray.shape
         if h < th or w < tw:
@@ -219,8 +237,11 @@ class Detector:
             if score>=.90:
                 break
         if score < .80:
-            for template in self.templates:
-                value,local=self._search_full(gray,template)
+            small = prompt.reduced()
+            for template, small_template in zip(self.templates, self._half_templates):
+                if small_template is None:
+                    small_template = _half_size(template)
+                value,local=self._search_full(gray,small,template,small_template)
                 if local is not None and value>score:
                     th,tw=template.shape
                     score=value
@@ -252,11 +273,18 @@ class Detector:
         # A local angular ridge must persist along the radial segment. Broad
         # colored clothes/background can be red but do not form that ridge.
         samples = self._sample(frame,center,self._needle_radii)
-        red = np.maximum(0, samples[:,:,2]-np.maximum(samples[:,:,0],samples[:,:,1]))
-        side = np.maximum(np.roll(red,12,axis=0),np.roll(red,-12,axis=0))
-        contrast = red-side
+        red = np.maximum(samples[:, :, 0], samples[:, :, 1])
+        np.subtract(samples[:, :, 2], red, out=red)
+        np.maximum(red, 0, out=red)
+        # Compare angular neighbors with the same circular wrap as the profile.
+        offset = 12
+        contrast = np.empty_like(red)
+        np.maximum(red[:-2*offset], red[2*offset:], out=contrast[offset:-offset])
+        np.maximum(red[-offset:], red[offset:2*offset], out=contrast[:offset])
+        np.maximum(red[-2*offset:-offset], red[:offset], out=contrast[-offset:])
+        np.subtract(red, contrast, out=contrast)
         support = ((red>12)&(contrast>7)).mean(axis=1)
-        profile = np.maximum(contrast,0).mean(axis=1)
+        profile = np.maximum(contrast,0,out=contrast).mean(axis=1)
         peaks = np.flatnonzero((profile>=np.roll(profile,1)) & (profile>np.roll(profile,-1)) &
                               (profile>10) & (support>=.55))
         candidates=[]
@@ -291,10 +319,11 @@ class ScaleFallbackDetector:
         self._preferred, self._alternate = primary, alternate
 
     def measure(self, frame, timestamp, *, center_hint=None):
-        result = self._preferred.measure(frame, timestamp, center_hint=center_hint)
+        prompt = _PromptFrame(frame, timestamp)
+        result = self._preferred._measure(frame, timestamp, prompt, center_hint)
         if center_hint is not None or result.reason == 'OK':
             return result
-        candidate = self._alternate.measure(frame, timestamp)
+        candidate = self._alternate._measure(frame, timestamp, prompt, None)
         if candidate.reason == 'OK':
             self._preferred, self._alternate = self._alternate, self._preferred
             return candidate

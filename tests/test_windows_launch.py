@@ -10,6 +10,7 @@ import pytest
 import run as cli
 from vd import runtime, windows_capture, windows_input
 from vd.capture import Frame
+from vd.vision import Measurement
 
 
 def test_windows_cli_selects_dxgi_and_keeps_dry_run_passive(monkeypatch, tmp_path):
@@ -166,3 +167,62 @@ def test_dxgi_runtime_only_opens_input_for_run(monkeypatch, tmp_path, physical):
     assert manifest['detector_alternate_ui_scale'] == 768 / 1080
     assert manifest['capture_physical_roi'] == [523, 264, 320, 240]
     assert manifest['held_source'] == ('win32' if physical else 'assumed_for_dry_run')
+
+
+def test_dxgi_runtime_skips_stale_pixels_before_cv_and_measures_next_frame(monkeypatch, tmp_path):
+    now = 100.0
+    measured = []
+    pixels = np.empty((240, 320, 3), np.uint8)
+
+    class Capture:
+        cv = threading.Condition()
+        proc = SimpleNamespace(poll=lambda: None)
+        stopping = False
+        error = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def next(self, after=-1, timeout=0):
+            nonlocal now
+            if after == -1:
+                media, copied, received, published = 99.75, 99.753, 99.998, 99.999
+            elif after == 0:
+                now = 100.02
+                media, copied, received, published = 100.012, 100.015, 100.017, 100.018
+            else:
+                now += timeout * 2
+                return None
+            self.latest = Frame(after + 1, pixels, media, received, published,
+                                'dxgi_qpc', False, None, 'BGRA', source_size=(1366, 768),
+                                copy_completed_time=copied, published_time=published)
+            return self.latest
+
+    def measure(_detector, _image, timestamp, *, center_hint=None):
+        measured.append(timestamp)
+        return Measurement(timestamp, None, 0, None, None, (), 'NO_PROMPT')
+
+    def clock():
+        return now
+
+    monkeypatch.setattr(runtime, 'time', SimpleNamespace(monotonic=clock,
+                                                        perf_counter=clock, process_time=clock))
+    monkeypatch.setattr(runtime.Detector, 'measure', measure)
+    result = runtime.run_session(seconds=.04, synthetic=False, fps=60, directory=tmp_path / 'session',
+                                 lead_seconds=.004, lead_uncertainty=.020, physical=False,
+                                 capture_source='dxgi', capture_factory=Capture,
+                                 capture_priority=None, recording=False, video_recording=False)
+
+    assert result['frames'] == 2
+    assert result['physical_presses'] == 0
+    assert measured == [100.012]
+    performance = result['performance']
+    assert performance['dxgi_stale_before_cv'] == 1
+    for stage, expected_p95 in (('dxgi_present_to_copy_ms', 3),
+                                ('dxgi_copy_to_receive_ms', 245),
+                                ('dxgi_receive_to_publish_ms', 1)):
+        assert performance[stage]['samples'] == 2
+        assert performance[stage]['p95'] == pytest.approx(expected_p95)

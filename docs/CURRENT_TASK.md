@@ -46,7 +46,18 @@
   publication and LMB are checked before dispatch. A fake-clock regression
   models the old 12 ms limit missing a deadline 25 ms away. Live beta 4
   accuracy still needs verification.
-- Windows distribution uses the `v0.1.0-beta.4` release and its portable ZIP.
+- A beta 4 Windows report recorded two last-chance attempts, 54.8 ms active
+  CV p95 and 116.0 ms active source-age p95. One press took 10.5 ms inside
+  Win32. The data did not establish a game response delay or a GPU bottleneck.
+- Beta 5 skips frames already past the 80 ms freshness gate before DXGI CV.
+  The timeout branch validates any newly published frame against the same
+  source before claiming a due prediction. Windows reports timing for DXGI
+  present-to-copy, copy-to-receive, receive-to-publish and the detector thread.
+  On 221 archived DXGI frames, shared prompt preprocessing and less temporary
+  array allocation kept all measurements identical across acquisition and
+  tracking passes. The local full-frame acquisition p95 fell from 4.42 to
+  4.18 ms. The benefit on the tester's PC remains unmeasured.
+- Windows distribution uses the `v0.1.0-beta.5` release and its portable ZIP.
   `tools/build_windows_release.py` bundles pinned Windows wheels, embedded
   CPython and the built DXGI worker. `vd.cmd` runs the CLI with bundled Python.
   README includes a PowerShell download with SHA-256 verification.

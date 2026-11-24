@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import json
 import threading
 from pathlib import Path
@@ -7,6 +8,7 @@ import pytest
 
 from vd import runtime
 from vd.calibration import FreezeObserver
+from vd.capture import Frame
 from vd.engine import Engine
 from vd.motion import Motion
 from vd.vision import Arc,Measurement,Needle
@@ -188,6 +190,65 @@ def test_dxgi_timer_with_slow_cv_and_newer_capture(monkeypatch, source_state):
             assert 0 in waits
     else:
         assert not presses
+
+
+@pytest.mark.parametrize('same_source', [True, False])
+def test_dxgi_runtime_dispatches_due_prediction_after_capture_timeout(
+        monkeypatch, tmp_path, capsys, same_source):
+    clock = SimpleNamespace(now=1.0)
+    monkeypatch.setattr(runtime, 'time', SimpleNamespace(
+        monotonic=lambda: clock.now, perf_counter=lambda: clock.now,
+        process_time=lambda: 0.0))
+    capture = SimpleNamespace(cv=threading.Condition(), stopping=False, error=None,
+                              proc=SimpleNamespace(poll=lambda: None), latest=None)
+    image = SimpleNamespace(shape=(240, 320, 3))
+
+    def frame(sequence, timestamp, generation=1):
+        return Frame(sequence, image, timestamp, timestamp, timestamp, 'test', False,
+                     None, '', source_epoch=(41, 1), source_generation=generation)
+
+    # The fake detector makes the production engine plan a press at 1.050.
+    # After the timeout, publication can win the race before dispatch checks it.
+    def next_frame(after=-1, timeout=1.0):
+        if after < 2:
+            clock.now = 1.0 + (after + 1) * .020
+            capture.latest = frame(after + 1, clock.now)
+            return capture.latest
+        if capture.latest.sequence == 2:
+            assert clock.now + timeout == pytest.approx(1.050)
+            clock.now = 1.051
+            capture.latest = frame(3, 1.050, generation=1 if same_source else 2)
+        else:
+            clock.now = 2.0
+        return None
+
+    capture.next = next_frame
+    capture.prediction_current = lambda sample: sample is capture.latest
+
+    class Detector:
+        roi_offset = (0, 0)
+
+        def __init__(self, **_):
+            pass
+
+        def measure(self, _image, timestamp, *, center_hint):
+            angle = 20.0 + (timestamp - 1.0) * 500
+            return Measurement(timestamp, (160, 120), 1.0, Arc(40, 10), None,
+                               (Needle(angle, 80, 1, 40, 2),), 'OK')
+
+    monkeypatch.setattr(runtime, 'Detector', Detector)
+    result = runtime.run_session(seconds=.1, synthetic=False, fps=50, directory=tmp_path,
+        lead_seconds=0, lead_uncertainty=0, recording=False, capture_source='dxgi',
+        capture_factory=lambda: nullcontext(capture))
+
+    claims = [event for event in map(json.loads, capsys.readouterr().out.splitlines())
+              if event['kind'] == 'PRESS_CLAIM']
+    assert result['frames'] == 3
+    assert result['physical_presses'] == 0
+    assert result['claims'] == len(claims) == int(same_source)
+    if same_source:
+        assert claims[0]['at'] == pytest.approx(1.051)
+        assert claims[0]['plan']['timing_mode'] == 'PREDICTED'
 
 
 @pytest.mark.parametrize(('session','generation'),[

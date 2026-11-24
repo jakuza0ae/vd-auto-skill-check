@@ -27,7 +27,7 @@ late attempt at GREAT; its actual outcome can be GREAT, GOOD or MISS.
 
 ## Start on Windows
 
-The [Windows x64 pre-release](https://github.com/jakuza0ae/vd-auto-skill-check/releases/tag/v0.1.0-beta.4)
+The [Windows x64 pre-release](https://github.com/jakuza0ae/vd-auto-skill-check/releases/tag/v0.1.0-beta.5)
 includes Python, OpenCV and the DXGI worker. On Windows 10 or 11, download
 `vd-windows-x64.zip`, extract it and open PowerShell in the extracted folder.
 Run `./vd.cmd preflight` to check the installation.
@@ -38,7 +38,7 @@ check the same release in your user folder. It installs on a per-user basis.
 ```powershell
 & {
     $ErrorActionPreference = 'Stop'
-    $tag = 'v0.1.0-beta.4'
+    $tag = 'v0.1.0-beta.5'
     $base = "https://github.com/jakuza0ae/vd-auto-skill-check/releases/download/$tag"
     $dir = Join-Path $env:LOCALAPPDATA "VD-Solver\$tag"
     $zip = Join-Path $env:TEMP ("vd-{0}.zip" -f [guid]::NewGuid())
@@ -63,16 +63,17 @@ Use `run` to enable Space output while LMB is held and Roblox is in the
 foreground on the captured display. Ctrl+C stops the solver.
 
 ```powershell
-Set-Location "$env:LOCALAPPDATA\VD-Solver\v0.1.0-beta.4" # for the PowerShell installation
+Set-Location "$env:LOCALAPPDATA\VD-Solver\v0.1.0-beta.5" # for the PowerShell installation
 ./vd.cmd capture-probe --seconds 10
 ./vd.cmd dry-run --seconds 10 --no-recording
 ./vd.cmd run
 ```
 
 Live testing at 1366×768 confirmed prompt detection and the beta 3 Space input.
-Beta 4 reserves more time for the existing center timer when recent image
-processing is slow. The timing changes were tested with a simulated clock.
-In-game accuracy on beta 4 remains unmeasured.
+Beta 5 discards stale DXGI frames before image processing and keeps a due
+prediction when a valid frame from the same source arrives just after the
+timer wakes. Its Windows performance report also separates capture stages and
+shows CPU time spent in the detector. In-game accuracy on beta 5 remains unmeasured.
 
 The worker uses [DXGI Desktop Duplication](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/desktop-duplication-api)
 with the standard Roblox launcher or Bloxstrap and supports the ordinary Direct3D 11

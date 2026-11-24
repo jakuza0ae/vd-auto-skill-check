@@ -23,12 +23,16 @@
 - Windows capture now reserves the final millisecond before a scheduled press
   for bounded polling between frames. The reader can still publish a frame in
   that interval. Ordinary capture waits continue to block on the condition.
-- The user currently has no Windows machine for the passive capture probe.
-- A real Windows GPU is still needed to verify live frame delivery, monitor and
-  focus behavior, Roblox input acceptance and FPS impact on a weak PC. Run the
-  documented passive probe first. Wine and fixture results do not measure those
-  outcomes. No game session or physical input was used.
-- Windows distribution uses the `v0.1.0-beta.1` release and its portable ZIP.
+- A user's Windows tester confirmed live desktop frames at 1366×768 in beta 1.
+  The session ended with `DXGI_ERROR_ACCESS_LOST`. The manifest recorded zero
+  input events. The cause of an accompanying Roblox crash is unverified.
+- The beta 2 default crop keeps at least 320×240 physical pixels on smaller
+  displays that can fit it. The detector tries the viewport scale during
+  acquisition if the native pixel scale fails, and keeps the accepted scale
+  through tracking. At 1366×768 the original crop missed the fixed-size prompt
+  in the screenshot fixture. Both scaled and fixed-pixel fixtures now detect it.
+- Live beta 2 detection, Roblox input acceptance and FPS impact remain open.
+- Windows distribution uses the `v0.1.0-beta.2` release and its portable ZIP.
   `tools/build_windows_release.py` bundles pinned Windows wheels, embedded
   CPython and the built DXGI worker. `vd.cmd` runs the CLI with bundled Python.
   README includes a PowerShell download with SHA-256 verification.

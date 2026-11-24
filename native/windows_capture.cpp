@@ -27,13 +27,14 @@ using Microsoft::WRL::ComPtr;
 
 constexpr UINT reference_width = 1920;
 constexpr UINT reference_height = 1080;
+constexpr std::array<UINT, 4> default_roi{800, 420, 320, 240};
 constexpr UINT64 ns_per_second = 1'000'000'000;
 
 struct Options {
     std::optional<UINT> device;
     std::optional<UINT> output;
     UINT fps = 120;
-    std::array<UINT, 4> roi{800, 420, 320, 240};
+    std::optional<std::array<UINT, 4>> roi;
     bool list_outputs = false;
     bool help = false;
 };
@@ -227,12 +228,24 @@ FrameHeader frame_header(const Output& output, const Options& options) {
     header.source_height = rect.bottom - rect.top;
     header.source_x = rect.left;
     header.source_y = rect.top;
-    header.roi_x = scale_coordinate(options.roi[0], header.source_width, reference_width);
-    header.roi_y = scale_coordinate(options.roi[1], header.source_height, reference_height);
-    header.roi_width = std::min(scale_coordinate(options.roi[2], header.source_width, reference_width),
+    const auto roi = options.roi.value_or(default_roi);
+    header.roi_x = scale_coordinate(roi[0], header.source_width, reference_width);
+    header.roi_y = scale_coordinate(roi[1], header.source_height, reference_height);
+    header.roi_width = std::min(scale_coordinate(roi[2], header.source_width, reference_width),
                                header.source_width - header.roi_x);
-    header.roi_height = std::min(scale_coordinate(options.roi[3], header.source_height, reference_height),
+    header.roi_height = std::min(scale_coordinate(roi[3], header.source_height, reference_height),
                                 header.source_height - header.roi_y);
+    // The skill-check can keep its pixel size even when the display mode shrinks.
+    if (!options.roi && header.source_width >= roi[2] && header.source_height >= roi[3]) {
+        if (header.roi_width < roi[2]) {
+            header.roi_width = roi[2];
+            header.roi_x = (header.source_width - header.roi_width) / 2;
+        }
+        if (header.roi_height < roi[3]) {
+            header.roi_height = roi[3];
+            header.roi_y = (header.source_height - header.roi_height) / 2;
+        }
+    }
     if (!header.roi_width || !header.roi_height) {
         throw std::runtime_error("The scaled capture region is empty");
     }

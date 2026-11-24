@@ -279,3 +279,23 @@ class Detector:
             if len(candidates)==4:break
         reason='OK' if great is not None and candidates else ('NO_TARGET' if great is None else 'NO_LINE_CANDIDATE')
         return Measurement(timestamp,center,float(score),great,good,tuple(candidates),reason)
+
+
+class ScaleFallbackDetector:
+    """Choose a prompt scale at acquisition and keep it while tracking the ring."""
+
+    def __init__(self, alternate_ui_scale, **detector_options):
+        primary = Detector(**detector_options)
+        alternate = Detector(**(detector_options | {'ui_scale': alternate_ui_scale}))
+        self.roi_offset = primary.roi_offset
+        self._preferred, self._alternate = primary, alternate
+
+    def measure(self, frame, timestamp, *, center_hint=None):
+        result = self._preferred.measure(frame, timestamp, center_hint=center_hint)
+        if center_hint is not None or result.reason == 'OK':
+            return result
+        candidate = self._alternate.measure(frame, timestamp)
+        if candidate.reason == 'OK':
+            self._preferred, self._alternate = self._alternate, self._preferred
+            return candidate
+        return result

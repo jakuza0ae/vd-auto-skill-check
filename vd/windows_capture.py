@@ -293,6 +293,17 @@ class WindowsCapture:
         with self.cv:
             return self._region.roi if self._region is not None else None
 
+    @property
+    def alternate_ui_scale(self):
+        with self.cv:
+            region = self._region
+        if region is not None and region.roi[2:] == self.roi[2:]:
+            width, height = region.source_size
+            scale = min(width / 1920, height / 1080)
+            if scale < 1:
+                return scale
+        return None
+
     def close(self, *, fast=False):
         with self.cv:
             if self.stopping:

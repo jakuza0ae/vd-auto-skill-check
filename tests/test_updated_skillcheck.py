@@ -7,16 +7,31 @@ import pytest
 
 from vd.engine import Engine
 from vd.image_io import read_image
-from vd.vision import Detector, retained_target
+from vd.vision import Detector, ScaleFallbackDetector, retained_target
 
 
 FIXTURE = Path(__file__).parent / 'fixtures' / 'skillcheck_20261024.png'
+WINDOWS_768_UI_SCALE = 768 / 1080
 
 
 def updated_frame():
     frame = read_image(FIXTURE, cv2.IMREAD_COLOR)
     assert frame is not None
     return frame
+
+
+def windows_768_roi(ui_scale, offset):
+    screen_width, screen_height = 1366, 768
+    roi_width, roi_height = 320, 240
+    left = (screen_width - roi_width) // 2
+    top = (screen_height - roi_height) // 2
+    center_x = screen_width / 2 + offset[0] * ui_scale
+    center_y = screen_height / 2 + offset[1] * ui_scale
+    transform = np.array([[ui_scale, 0, center_x - 122 * ui_scale],
+                          [0, ui_scale, center_y - 106.5 * ui_scale]], np.float32)
+    screen = cv2.warpAffine(updated_frame(), transform, (screen_width, screen_height),
+                            borderValue=(18, 21, 25))
+    return screen[top:top + roi_height, left:left + roi_width]
 
 
 def moving_updated_frame(angle, great_start=153):
@@ -91,6 +106,39 @@ def test_updated_prompt_works_in_live_compact_roi(center, scale):
     assert measured.great.center == pytest.approx(158.5, abs=2)
     assert len(measured.candidates) == 1
     assert measured.candidates[0].angle == pytest.approx(152.1, abs=2)
+
+
+@pytest.mark.parametrize('ui_scale', (1.0, WINDOWS_768_UI_SCALE))
+@pytest.mark.parametrize('offset', ((0, 42.5), (10, -37.5)))
+def test_windows_768_capture_fixture_accepts_both_ui_scales(ui_scale, offset):
+    measured = ScaleFallbackDetector(WINDOWS_768_UI_SCALE).measure(
+        windows_768_roi(ui_scale, offset), 1.0)
+
+    assert measured.reason == 'OK'
+    assert measured.prompt_score >= .80
+    assert measured.center == pytest.approx((160 + offset[0] * ui_scale,
+                                              120 + offset[1] * ui_scale), abs=1)
+    assert measured.great is not None
+    assert measured.great.start == pytest.approx(153.4, abs=2)
+    assert measured.great.width == pytest.approx(10.2, abs=2)
+    assert len(measured.candidates) == 1
+    assert measured.candidates[0].angle == pytest.approx(152.1, abs=2)
+
+
+def test_windows_768_fixture_changes_scale_only_on_acquisition():
+    detector = ScaleFallbackDetector(WINDOWS_768_UI_SCALE)
+    full_size = windows_768_roi(1.0, (0, 42.5))
+    fractional_size = windows_768_roi(WINDOWS_768_UI_SCALE, (0, 42.5))
+    first = detector.measure(fractional_size, 1.0)
+    assert first.reason == 'OK'
+
+    tracking = detector.measure(full_size, 1.02, center_hint=first.center)
+    reacquired = detector.measure(full_size, 1.04)
+
+    assert tracking.prompt_score < .80
+    assert tracking.great is None
+    assert reacquired.reason == 'OK'
+    assert reacquired.center == pytest.approx((160, 162.5), abs=1)
 
 
 def test_updated_prompt_survives_video_compression_and_brightness_change():

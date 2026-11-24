@@ -95,6 +95,8 @@ def test_dxgi_runtime_only_opens_input_for_run(monkeypatch, tmp_path, physical):
         stopping = False
         error = None
         roi = (800, 420, 320, 240)
+        physical_roi = (523, 264, 320, 240)
+        alternate_ui_scale = 768 / 1080
 
         def __enter__(self):
             lifecycle.append('capture')
@@ -108,7 +110,7 @@ def test_dxgi_runtime_only_opens_input_for_run(monkeypatch, tmp_path, physical):
             now = time.monotonic()
             self.latest = Frame(after + 1, np.zeros((240, 320, 3), np.uint8),
                                 now, now, now, 'dxgi_qpc', False, None, 'BGRA',
-                                source_size=(1920, 1080))
+                                source_size=(1366, 768))
             return self.latest
 
         def window_matches_capture(self, hwnd):
@@ -161,4 +163,6 @@ def test_dxgi_runtime_only_opens_input_for_run(monkeypatch, tmp_path, physical):
     manifest = json.loads((directory / 'manifest.json').read_text())
     assert manifest['complete']
     assert manifest['capture_source'] == 'dxgi'
+    assert manifest['detector_alternate_ui_scale'] == 768 / 1080
+    assert manifest['capture_physical_roi'] == [523, 264, 320, 240]
     assert manifest['held_source'] == ('win32' if physical else 'assumed_for_dry_run')

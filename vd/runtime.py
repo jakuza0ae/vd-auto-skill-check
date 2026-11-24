@@ -13,7 +13,7 @@ from vd.motion import Motion
 from vd.engine import Engine
 from vd.dispatch import dispatch
 from vd.recording import Recorder, read_recording
-from vd.vision import Arc, Detector, retained_target
+from vd.vision import Arc, Detector, ScaleFallbackDetector, retained_target
 
 
 class _NullRecorder:
@@ -211,7 +211,12 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
             detector_options=dict(
                 roi_offset=REGION_ROI_OFFSET if capture_source=='region' else (0,0),
                 ui_scale=ui_scale)
-            detector=Detector(**detector_options)
+            alternate_ui_scale=getattr(capture,'alternate_ui_scale',None)
+            if alternate_ui_scale is None:
+                detector=Detector(**detector_options)
+            else:
+                detector=ScaleFallbackDetector(alternate_ui_scale,**detector_options)
+                recorder.metadata['detector_alternate_ui_scale']=alternate_ui_scale
             recorder.metadata['detector_ui_scale']=ui_scale
             recorder.metadata['capture_frame_size']=[frame.image.shape[1],frame.image.shape[0]]
             if getattr(capture, 'roi', None) is not None:
@@ -389,7 +394,9 @@ def replay(directory):
     detector_options=dict(roi_offset=tuple(manifest.get('detector_roi_offset',(0,0))))
     if manifest.get('detector_ui_scale',1.0)!=1.0:
         detector_options['ui_scale']=manifest['detector_ui_scale']
-    detector=Detector(**detector_options)
+    alternate_ui_scale=manifest.get('detector_alternate_ui_scale')
+    detector=(Detector(**detector_options) if alternate_ui_scale is None else
+              ScaleFallbackDetector(alternate_ui_scale,**detector_options))
     rows=[]
     events=[]
     previous_decision=None
@@ -432,7 +439,9 @@ def replay(directory):
             engine.cancel('SOURCE_RECREATED',now)
         previous_source_identity=identity
         timestamp=row['media_time']
-        if timestamp is None:
+        if alternate_ui_scale is not None and not row['held']:
+            engine.cancel('LMB_RELEASED',now)
+        elif timestamp is None:
             engine.cancel('NO_MEDIA_TIMESTAMP',now)
         else:
             m=detector.measure(image,timestamp,center_hint=engine.center)

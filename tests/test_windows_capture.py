@@ -119,6 +119,17 @@ def test_incomplete_new_frame_blocks_prediction_until_publication(fake_helper):
         assert capture.prediction_current(newest)
 
 
+@pytest.mark.parametrize('roi,expected_scale', [((523, 264, 320, 240), 768 / 1080),
+                                               ((569, 299, 228, 171), None)])
+def test_1366_capture_enables_fallback_only_with_uncropped_geometry(fake_helper, roi,
+                                                                  expected_scale):
+    _, emit = fake_helper
+    with windows_capture.WindowsCapture() as capture:
+        emit(packet(source_size=(1366, 768), roi=roi))
+        assert capture.next(timeout=4) is not None
+        assert capture.alternate_ui_scale == expected_scale
+
+
 @pytest.mark.parametrize('publish_frame', [False, True])
 def test_capture_wait_reserves_last_millisecond_for_dispatch(monkeypatch, publish_frame):
     now = 20.0

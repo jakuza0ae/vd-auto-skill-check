@@ -10,8 +10,10 @@ from .input_state import InputDisarmed, Keydown, MouseState
 
 _VK_LBUTTON = 0x01
 _VK_SPACE = 0x20
+_SCAN_SPACE = 0x39
 _INPUT_KEYBOARD = 1
 _KEYEVENTF_KEYUP = 0x0002
+_KEYEVENTF_SCANCODE = 0x0008
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 _DWORD = ctypes.c_uint32
@@ -92,8 +94,8 @@ class _Win32:
 
     def set_space(self, down):
         event = _Input(type=_INPUT_KEYBOARD)
-        event.payload.ki.wVk = _VK_SPACE
-        event.payload.ki.dwFlags = 0 if down else _KEYEVENTF_KEYUP
+        event.payload.ki.wScan = _SCAN_SPACE
+        event.payload.ki.dwFlags = _KEYEVENTF_SCANCODE | (0 if down else _KEYEVENTF_KEYUP)
         ctypes.set_last_error(0)
         if self.send_input(1, ctypes.byref(event), ctypes.sizeof(event)) != 1:
             error = ctypes.get_last_error()
@@ -167,7 +169,7 @@ class WindowsMouseMonitor:
 
 
 class WindowsSpaceOutput:
-    def __init__(self, mouse, pulse_seconds=.035):
+    def __init__(self, mouse, pulse_seconds=.080):
         if not 0.01 <= pulse_seconds <= 0.1:
             raise ValueError('Space pulse must be in [10, 100] ms')
         self._mouse = mouse
@@ -195,7 +197,7 @@ class WindowsSpaceOutput:
             if self._closed:
                 raise RuntimeError('Space output is closed')
             if self._pressed:
-                raise RuntimeError('Previous Space pulse has not been released')
+                raise InputDisarmed('Previous Space pulse has not been released')
             self._mouse._check_keydown()
             requested = time.monotonic()
             self._pressed = True

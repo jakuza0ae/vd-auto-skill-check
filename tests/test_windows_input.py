@@ -119,13 +119,27 @@ def test_space_releases_after_focus_change(input_devices):
     release_timer = output._release_timer
     assert result.syn_completed_at >= result.requested_at
     assert release_timer.started
-    assert release_timer.interval == .035
+    assert release_timer.interval == .080
     assert api.writes == [True]
-    with pytest.raises(RuntimeError, match='not been released'):
-        output.pulse()
     api.target = None
     release_timer.release()
     output.close()
+    assert api.writes == [True, False]
+
+
+def test_space_overlap_disarms_without_releasing_the_current_pulse(input_devices):
+    api, _, _, output = input_devices
+    output.pulse()
+    timer = output._release_timer
+
+    with pytest.raises(InputDisarmed, match='not been released') as overlap:
+        output.pulse()
+
+    assert isinstance(overlap.value, RuntimeError)
+    assert output._release_timer is timer
+    assert not timer.cancelled
+    assert api.writes == [True]
+    timer.release()
     assert api.writes == [True, False]
 
 
@@ -207,13 +221,14 @@ def test_send_input_encodes_native_space_events(monkeypatch):
         assert count == 1
         assert size == (40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
         event = ctypes.cast(pointer, ctypes.POINTER(windows_input._Input)).contents
-        events.append((event.type, event.payload.ki.wVk, event.payload.ki.dwFlags))
+        events.append((event.type, event.payload.ki.wVk, event.payload.ki.wScan,
+                       event.payload.ki.dwFlags))
         return count
 
     api.send_input = send_input
     api.set_space(True)
     api.set_space(False)
-    assert events == [(1, 0x20, 0), (1, 0x20, 2)]
+    assert events == [(1, 0, 0x39, 0x0008), (1, 0, 0x39, 0x000a)]
     api.send_input = lambda *args: 0
     monkeypatch.setattr(ctypes, 'get_last_error', lambda: 0, raising=False)
     with pytest.raises(OSError, match='keydown was rejected by Windows'):

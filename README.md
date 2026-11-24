@@ -27,7 +27,7 @@ late attempt at GREAT; its actual outcome can be GREAT, GOOD or MISS.
 
 ## Start on Windows
 
-The [Windows x64 pre-release](https://github.com/jakuza0ae/vd-auto-skill-check/releases/tag/v0.1.0-beta.2)
+The [Windows x64 pre-release](https://github.com/jakuza0ae/vd-auto-skill-check/releases/tag/v0.1.0-beta.3)
 includes Python, OpenCV and the DXGI worker. On Windows 10 or 11, download
 `vd-windows-x64.zip`, extract it and open PowerShell in the extracted folder.
 Run `./vd.cmd preflight` to check the installation.
@@ -38,7 +38,7 @@ check the same release in your user folder. It installs on a per-user basis.
 ```powershell
 & {
     $ErrorActionPreference = 'Stop'
-    $tag = 'v0.1.0-beta.2'
+    $tag = 'v0.1.0-beta.3'
     $base = "https://github.com/jakuza0ae/vd-auto-skill-check/releases/download/$tag"
     $dir = Join-Path $env:LOCALAPPDATA "VD-Solver\$tag"
     $zip = Join-Path $env:TEMP ("vd-{0}.zip" -f [guid]::NewGuid())
@@ -63,17 +63,16 @@ Use `run` to enable Space output while LMB is held and Roblox is in the
 foreground on the captured display. Ctrl+C stops the solver.
 
 ```powershell
-Set-Location "$env:LOCALAPPDATA\VD-Solver\v0.1.0-beta.2" # for the PowerShell installation
+Set-Location "$env:LOCALAPPDATA\VD-Solver\v0.1.0-beta.3" # for the PowerShell installation
 ./vd.cmd capture-probe --seconds 10
 ./vd.cmd dry-run --seconds 10 --no-recording
 ./vd.cmd run
 ```
 
-The Windows build and command line were tested under Wine. A Windows session
-with beta 1 confirmed desktop frame delivery at 1366×768. Beta 2 widens the
-crop on smaller displays and uses either of two prompt scales during acquisition.
-Its detector changes were checked against fixtures. Live Roblox input and
-performance on Windows remain unverified.
+The Windows build and command line were tested under Wine. A live Windows
+capture at 1366×768 confirmed prompt detection with beta 2. Beta 3 sends Space
+as a Windows scan code and holds it for 80 ms. Verify the response in Roblox
+before relying on the Windows build for skill checks.
 
 The worker uses [DXGI Desktop Duplication](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/desktop-duplication-api)
 with the standard Roblox launcher or Bloxstrap and supports the ordinary Direct3D 11

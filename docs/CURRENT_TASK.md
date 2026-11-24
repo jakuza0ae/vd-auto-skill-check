@@ -31,8 +31,16 @@
   acquisition if the native pixel scale fails, and keeps the accepted scale
   through tracking. At 1366×768 the original crop missed the fixed-size prompt
   in the screenshot fixture. Both scaled and fixed-pixel fixtures now detect it.
-- Live beta 2 detection, Roblox input acceptance and FPS impact remain open.
-- Windows distribution uses the `v0.1.0-beta.2` release and its portable ZIP.
+- Live beta 2 archived capture at 1366×768 has 55 positive detector frames out
+  of 221 samples. In a separate run Windows accepted one virtual-key Space
+  invocation, but the tester saw no game response. That attempt also logged
+  `GREAT_PASSED`. Neither the cause of the missing response nor the live grade
+  was established.
+- Beta 3 uses Win32 scan code 0x39 for both Space edges and holds it for 80 ms
+  to cover longer input polling intervals. An overlapping attempt is disarmed
+  and the scheduled release stays in place. Roblox acceptance and weak-PC
+  performance remain open.
+- Windows distribution uses the `v0.1.0-beta.3` release and its portable ZIP.
   `tools/build_windows_release.py` bundles pinned Windows wheels, embedded
   CPython and the built DXGI worker. `vd.cmd` runs the CLI with bundled Python.
   README includes a PowerShell download with SHA-256 verification.

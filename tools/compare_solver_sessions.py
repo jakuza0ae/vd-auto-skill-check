@@ -26,6 +26,39 @@ def distribution(values):
         max_ms=values[-1])
 
 
+def stage_timings(rows, stages):
+    delays={name:[] for name in stages}
+    for row in rows:
+        for name,(start,end) in stages.items():
+            a,b=row.get(start),row.get(end)
+            if isinstance(a,(int,float)) and isinstance(b,(int,float)) and b>=a:
+                delays[name].append((b-a)*1000)
+    return {name:distribution(values) for name,values in delays.items()}
+
+
+def windows_dispatch(keys, events):
+    timing=stage_timings(keys, {
+        'pre_keydown':('claimed_at','requested_at'),
+        'sendinput':('requested_at','at'),
+    })
+    predicted_offsets=[]
+    fallbacks=Counter()
+    for key in keys:
+        plan=key.get('plan',{})
+        if plan.get('timing_mode')=='LAST_CHANCE':
+            fallbacks[plan.get('fallback_reason') or 'UNKNOWN']+=1
+        elif plan.get('timing_mode')=='PREDICTED':
+            completed=key.get('at')
+            intended=plan.get('intended_press_at')
+            compensated=key.get('timing_components',{}).get('dispatch_delay')
+            if all(isinstance(value,(int,float)) for value in (completed,intended,compensated)):
+                predicted_offsets.append((completed-intended-compensated)*1000)
+    return dict(**timing, predicted_center_offset=distribution(predicted_offsets),
+        last_chance_reasons=dict(fallbacks),
+        pre_keydown_deadline_misses=sum(e.get('kind')=='INPUT_DEADLINE_MISSED' for e in events),
+        completed_outside_predicted_window=sum(e.get('outside_target_window') is True for e in keys))
+
+
 def present_intervals(events):
     """Difference cumulative native counters; discard pre-recording history."""
     previous={}
@@ -107,25 +140,35 @@ def summarize(directory, outcomes=None, native_events=None):
     begins={e['generation'] for e in events if e.get('kind')=='BEGIN'}
     keys=[e for e in events if e.get('kind')=='KEYDOWN']
     generations=begins|{e['generation'] for e in keys}
-    delays={name:[] for name in ('source_age','gpu_copy_completion','publication','reader_delivery')}
-    for row in frames:
-        pairs={'source_age':('decision_time','media_time'),
-            'gpu_copy_completion':('copy_completed_time','media_time'),
-            'publication':('published_time','copy_completed_time'),
-            'reader_delivery':('received_time','published_time')}
-        for name,(end,start) in pairs.items():
-            a,b=row.get(end),row.get(start)
-            if isinstance(a,(int,float)) and isinstance(b,(int,float)) and a>=b:
-                delays[name].append((a-b)*1000)
-    return dict(recording=str(directory),variant=manifest.get('variant'),
+    capture_source=manifest.get('capture_source')
+    dxgi=capture_source=='dxgi' or any(
+        row.get('timestamp_kind')=='dxgi-desktop-present-qpc' for row in frames)
+    capture_stages={'source_age':('media_time','decision_time')}
+    if dxgi:
+        capture_stages.update(present_to_acquire=('media_time','source_acquired_time'),
+            acquire_to_copy=('source_acquired_time','copy_completed_time'),
+            copy_to_receive=('copy_completed_time','received_time'),
+            receive_to_publish=('received_time','published_time'),
+            publish_to_decision=('published_time','decision_time'))
+    else:
+        capture_stages.update(gpu_copy_completion=('media_time','copy_completed_time'),
+            publication=('copy_completed_time','published_time'),
+            reader_delivery=('published_time','received_time'))
+    result=dict(recording=str(directory),variant=manifest.get('variant'),capture_source=capture_source,
         source_sha256=manifest.get('source_sha256'),detected_checks=len(begins),
         keydowns=len(keys),intended_targets=dict(Counter(e.get('plan',{}).get('target_grade','UNKNOWN') for e in keys)),
         cv_predictions=dict(Counter(e.get('landing',{}).get('label','UNKNOWN') for e in events if e.get('kind')=='CV_LANDING')),
         game_outcomes=confirmed_outcomes(outcomes,generations),
-        capture_timing={name:distribution(values) for name,values in delays.items()},
+        capture_timing=stage_timings(frames,capture_stages),
         present_intervals=present_intervals(read_jsonl(Path(native_events)) if native_events else events),
         telemetry_rows=len(frames),recording_complete=manifest.get('complete'),
         events_dropped=manifest.get('events_dropped'),telemetry_dropped=manifest.get('frames_dropped'))
+    if dxgi:
+        performance=manifest.get('performance',{})
+        result.update(windows_dispatch=windows_dispatch(keys,events),
+            windows_runtime_timing={name:value for name,value in performance.items()
+                if name.startswith('dxgi_') or name in ('active_cv_ms','active_source_age_ms')})
+    return result
 
 
 def write_outcome_template(directory, output):
@@ -153,10 +196,13 @@ def main():
         write_outcome_template(args.before,args.write_outcome_template)
         return
     if args.after is None:
-        parser.error('Supply both before and after recordings')
-    result=dict(before=summarize(args.before,args.outcomes_before,args.native_before),
-                after=summarize(args.after,args.outcomes_after,args.native_after),
-                comparable_scene_and_settings_verified=False)
+        if args.outcomes_after is not None or args.native_after is not None:
+            parser.error('After-run data requires a second recording')
+        result=summarize(args.before,args.outcomes_before,args.native_before)
+    else:
+        result=dict(before=summarize(args.before,args.outcomes_before,args.native_before),
+                    after=summarize(args.after,args.outcomes_after,args.native_after),
+                    comparable_scene_and_settings_verified=False)
     print(json.dumps(result,indent=2,allow_nan=False))
 
 

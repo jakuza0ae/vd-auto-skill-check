@@ -266,14 +266,17 @@ snapshot is used as a baseline; historical counters before recording are exclude
 Percentiles use 1 ms buckets (the last bucket is 255 ms or longer). These measure
 intervals between the game's Present calls, not GPU execution or display latency.
 
-Compare two sessions:
+Read one session or compare two sessions:
 
 ```bash
+.venv/bin/python tools/compare_solver_sessions.py recordings/AFTER
 .venv/bin/python tools/compare_solver_sessions.py recordings/BEFORE recordings/AFTER
 ```
 
-The report separates intended targets, CV predictions and manually confirmed
-verdicts. Without verdict annotations, game results remain unknown. Export a
+The Windows report includes the DXGI stages in clock order, the time before
+and inside SendInput, and predicted center offsets. The report separates
+intended targets, CV predictions and manually confirmed verdicts. Without
+verdict annotations, game results remain unknown. Export a
 CSV template, fill `outcome` with GREAT/GOOD/MISS only when the game's verdict is
 visible, and put the recording timestamp or other supporting observation in
 `evidence`. Leave unresolved checks as UNKNOWN.

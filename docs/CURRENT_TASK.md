@@ -27,9 +27,10 @@
   placed one delay at 8.25 ms before the Win32 request and a separate sample
   at 10.47 ms inside SendInput. The simulated case does not identify the
   cause of any actual grade.
-- Windows PowerShell downloaded and verified the public beta.6 release
-  installer on a clean CI runner. The beta.7 launcher uses the same path.
-  Verify a live run using visible grades and the event/manifest pair.
+- Windows PowerShell downloaded and verified public beta.7 on a clean runner
+  (run 45829094905). A single-run report from `tools/compare_solver_sessions.py`
+  reads DXGI capture stages, signed modeled offsets and deadline misses. Live
+  acceptance still requires visible grades and the matching logs from beta.7.
 
 ## Earlier task — updated prompt, 2026-10-24
 

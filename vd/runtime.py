@@ -114,7 +114,7 @@ def _wait_for_dxgi_measurement(future, engine, capture, frame, *, mouse, output,
                                   clock=time.monotonic, same_source_as=frame) is not None
             if engine.reason != 'CAPTURE_WRITING':
                 break
-        if future.done():
+        elif future.done():
             break
         # CPython uses a high-resolution Windows timer for time.sleep().
         # Yield to the reader and CV threads close to the deadline.

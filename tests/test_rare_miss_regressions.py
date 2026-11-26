@@ -252,7 +252,8 @@ def test_dxgi_runtime_dispatches_due_prediction_after_capture_timeout(
         assert claims[0]['plan']['timing_mode'] == 'PREDICTED'
 
 
-def test_dxgi_planned_press_runs_while_cv_is_still_in_flight(monkeypatch):
+@pytest.mark.parametrize('busy_at_deadline', [False, True])
+def test_dxgi_planned_press_runs_while_cv_is_still_in_flight(monkeypatch, busy_at_deadline):
     clock = SimpleNamespace(now=1.0)
     frame = Frame(1, None, 1.0, 1.0, 1.0, 'test', False, None, '',
                   source_epoch=(41, 1), source_generation=1)
@@ -265,20 +266,26 @@ def test_dxgi_planned_press_runs_while_cv_is_still_in_flight(monkeypatch):
     engine.planner.begin(engine.target, 22.5)
     engine.motion.estimate = Motion(1.0, 22.5, 900, .1, 2, 1.0, 12)
     plan = engine.planner.update(engine.motion.estimate, frame_at=1.0, now=1.0)
+    capture.prediction_busy = lambda: busy_at_deadline and clock.now < plan.press_at + .001
+    capture.prediction_current = lambda sample: sample is capture.latest and not capture.prediction_busy()
     future = Future()
     measurement = Measurement(1.0, None, 0, None, None, (), 'NO_PROMPT')
     missed = []
 
     def sleep(seconds):
         clock.now += max(seconds, .0001)
+        if busy_at_deadline and clock.now >= plan.press_at and not future.done():
+            future.set_result((measurement, 65, 4))
         if clock.now >= 1.065:
             missed.append(True)
             future.set_result((measurement, 65, 4))
 
     def pulse():
-        assert not future.done()
-        assert clock.now == pytest.approx(plan.press_at, abs=.0001)
-        future.set_result((measurement, 65, 4))
+        assert future.done() is busy_at_deadline
+        expected = plan.press_at + (.001 if busy_at_deadline else 0)
+        assert clock.now == pytest.approx(expected, abs=.0001)
+        if not future.done():
+            future.set_result((measurement, 65, 4))
         return SimpleNamespace(requested_at=clock.now, syn_completed_at=clock.now)
 
     monkeypatch.setattr(runtime, 'time', SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))

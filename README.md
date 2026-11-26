@@ -28,20 +28,22 @@ late attempt at GREAT; its actual outcome can be GREAT, GOOD or MISS.
 ## Start on Windows
 
 Paste this one command into **PowerShell** on Windows 10 or 11 x64. It installs
-beta 6 to your user folder, checks the package and starts the solver in the
+beta 7 to your user folder, checks the package and starts the solver in the
 same console. The portable package includes Python, OpenCV and the DXGI
-worker. [Windows release](https://github.com/jakuza0ae/vd-auto-skill-check/releases/tag/v0.1.0-beta.6)
+worker. [Windows release](https://github.com/jakuza0ae/vd-auto-skill-check/releases/tag/v0.1.0-beta.7)
 
 ```powershell
-& { $ErrorActionPreference='Stop'; $tag='v0.1.0-beta.6'; $script=Join-Path $env:TEMP ("vd-"+[guid]::NewGuid()+".ps1"); try { Invoke-WebRequest -UseBasicParsing "https://github.com/jakuza0ae/vd-auto-skill-check/releases/download/$tag/install-windows.ps1" -OutFile $script; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Tag $tag; if ($LASTEXITCODE -ne 0) { throw "VD launcher exited with code $LASTEXITCODE." } } finally { Remove-Item -LiteralPath $script -ErrorAction SilentlyContinue } }
+& { $ErrorActionPreference='Stop'; $tag='v0.1.0-beta.7'; $script=Join-Path $env:TEMP ("vd-"+[guid]::NewGuid()+".ps1"); try { Invoke-WebRequest -UseBasicParsing "https://github.com/jakuza0ae/vd-auto-skill-check/releases/download/$tag/install-windows.ps1" -OutFile $script; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Tag $tag; if ($LASTEXITCODE -ne 0) { throw "VD launcher exited with code $LASTEXITCODE." } } finally { Remove-Item -LiteralPath $script -ErrorAction SilentlyContinue } }
 ```
 
 Switch to fullscreen Roblox on the primary display and hold LMB to activate
 Space output. Ctrl+C stops the solver. The console shows the recording folder.
 For a timing test, keep event recording on, note visible GREAT/GOOD/MISS results
 and send the run's `manifest.json` and `events.jsonl` along with those results.
-The manifest separates the planned deadline, keydown and capture stages. Actual
-game grades and distance from the center require video or direct observation.
+The manifest separates the planned deadline, keydown and capture stages. If
+the final window check crosses a planned press deadline, the log records a
+skipped attempt. Actual game grades and distance from the center require video
+or direct observation.
 
 You can also download and extract `vd-windows-x64.zip` manually. From the
 extracted folder, the first three commands below run without keyboard input.

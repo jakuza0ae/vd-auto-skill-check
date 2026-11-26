@@ -21,10 +21,15 @@
   frames. Manifests also report pipe and publication delays, CV wall/thread
   CPU, dispatch wake lag, final key gate and SendInput. Scheduled errors are
   model estimates. Actual center accuracy still needs the Windows tester.
-- The beta.6 launcher installs and verifies a portable user-local ZIP and starts
-  the solver when pasted into PowerShell. GitHub Actions builds with MSVC and
-  tests installer preflight on Windows. Verify a live run using visible grades
-  and the matching event/manifest pair.
+- Beta 7 rechecks freshness and the press deadline after the final Win32
+  window and mouse validation. A simulated 15 ms stall at that gate now
+  records one skipped attempt and produces no keydown. An older Windows log
+  placed one delay at 8.25 ms before the Win32 request and a separate sample
+  at 10.47 ms inside SendInput. The simulated case does not identify the
+  cause of any actual grade.
+- Windows PowerShell downloaded and verified the public beta.6 release
+  installer on a clean CI runner. The beta.7 launcher uses the same path.
+  Verify a live run using visible grades and the event/manifest pair.
 
 ## Earlier task — updated prompt, 2026-10-24
 

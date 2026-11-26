@@ -8,7 +8,7 @@ from contextlib import nullcontext
 from dataclasses import asdict
 import time
 
-from .input_state import InputDisarmed
+from .input_state import InputDeadlineMissed, InputDisarmed
 
 
 def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.monotonic,
@@ -73,8 +73,18 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
             if plan is None:
                 return None
             if output is not None:
+                pulse_before=getattr(output,'pulse_before',None)
+                deadline=min(frame.media_time+engine.planner.max_age,
+                             plan.valid_until,plan.latest_press_at)
                 try:
-                    keydown=output.pulse()
+                    if pulse_before is None:
+                        keydown=output.pulse()
+                    else:
+                        keydown=pulse_before(deadline)
+                except InputDeadlineMissed:
+                    engine.emit('INPUT_DEADLINE_MISSED',clock(),deadline=deadline,plan=asdict(plan))
+                    engine.reason='INPUT_DEADLINE_MISSED'
+                    return None
                 except InputDisarmed as exc:
                     engine.emit('INPUT_DISARMED',clock(),error=str(exc),plan=asdict(plan))
                     engine.cancel('INPUT_DISARMED',clock())

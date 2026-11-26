@@ -9,7 +9,7 @@ import pytest
 from vd import windows_input
 from vd.dispatch import dispatch
 from vd.engine import Engine
-from vd.input_state import InputDisarmed
+from vd.input_state import InputDeadlineMissed, InputDisarmed
 from vd.motion import Motion
 from vd.planning import Arc
 
@@ -110,6 +110,37 @@ def test_space_rechecks_target_and_buttons_before_keydown(input_devices, change)
     with pytest.raises(InputDisarmed):
         output.pulse()
     assert api.writes == []
+
+
+@pytest.mark.parametrize('deadline', [1.025, 1.030])
+def test_space_accepts_request_at_or_before_deadline(input_devices, monkeypatch, deadline):
+    api, _, _, output = input_devices
+    monkeypatch.setattr(windows_input, 'time', SimpleNamespace(monotonic=lambda: 1.025))
+
+    result = output.pulse_before(deadline)
+
+    assert result.requested_at == 1.025
+    assert api.writes[:1] == [True]
+
+
+def test_space_checks_deadline_after_slow_window_recheck(input_devices, monkeypatch):
+    api, _, mouse, output = input_devices
+    assert mouse.snapshot().held
+    clock = SimpleNamespace(now=1.025)
+    monkeypatch.setattr(windows_input, 'time', SimpleNamespace(monotonic=lambda: clock.now))
+    matches_capture = mouse._window_matches_capture
+
+    def slow_check(hwnd):
+        clock.now += .015
+        return matches_capture(hwnd)
+
+    monkeypatch.setattr(mouse, '_window_matches_capture', slow_check)
+    with pytest.raises(InputDeadlineMissed):
+        output.pulse_before(1.029)
+
+    assert api.writes == []
+    assert not output._pressed
+    assert output._release_timer is None
 
 
 def test_space_releases_after_focus_change(input_devices):
@@ -246,9 +277,9 @@ def test_dispatch_cancels_when_win32_focus_changes_after_claim(input_devices, mo
                               latest=frame, proc=SimpleNamespace(poll=lambda: None))
     pulse = output.pulse
 
-    def lose_focus():
+    def lose_focus(**kwargs):
         api.target = None
-        return pulse()
+        return pulse(**kwargs)
 
     monkeypatch.setattr(output, 'pulse', lose_focus)
     result = dispatch(engine, capture, frame.sequence, mouse=mouse, output=output, clock=lambda: 1.0)

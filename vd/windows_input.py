@@ -5,7 +5,7 @@ from pathlib import PureWindowsPath
 import threading
 import time
 
-from .input_state import InputDisarmed, Keydown, MouseState
+from .input_state import InputDeadlineMissed, InputDisarmed, Keydown, MouseState
 
 
 _VK_LBUTTON = 0x01
@@ -192,7 +192,10 @@ class WindowsSpaceOutput:
             except OSError as exc:
                 self.error = str(exc)
 
-    def pulse(self):
+    def pulse_before(self, deadline):
+        return self.pulse(deadline=deadline)
+
+    def pulse(self, *, deadline=None):
         with self._mouse.lock, self._lock:
             if self._closed:
                 raise RuntimeError('Space output is closed')
@@ -200,6 +203,8 @@ class WindowsSpaceOutput:
                 raise InputDisarmed('Previous Space pulse has not been released')
             self._mouse._check_keydown()
             requested = time.monotonic()
+            if deadline is not None and requested > deadline:
+                raise InputDeadlineMissed('Space deadline passed before SendInput')
             self._pressed = True
             try:
                 self._api.set_space(True)

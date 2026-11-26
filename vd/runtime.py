@@ -144,6 +144,7 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
     deadline_cv_deferrals=0
     dxgi_stale_before_cv=0
     dxgi_claims_during_cv=0
+    dxgi_pre_keydown_deadlines_missed=0
     mouse=None
     output=None
     mode='run' if physical else 'dry-run'
@@ -206,6 +207,7 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
         def events():
             nonlocal presses,keydowns,observer,observer_generation
             nonlocal observer_dispatch_lag,observer_calibration_applied
+            nonlocal dxgi_pre_keydown_deadlines_missed
             for event in engine.take_events():
                 event['physical_input']=(None if event['kind']=='INPUT_FAILED'
                                          else event['kind']=='KEYDOWN')
@@ -214,6 +216,8 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                 recorder.event(event)
                 if event['kind']=='PRESS_CLAIM':
                     presses+=1
+                if event['kind']=='INPUT_DEADLINE_MISSED' and windows_capture:
+                    dxgi_pre_keydown_deadlines_missed+=1
                 if event['kind']=='KEYDOWN':
                     keydowns+=1
                     if windows_capture:
@@ -494,6 +498,7 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
             if windows_capture:
                 performance['dxgi_stale_before_cv']=dxgi_stale_before_cv
                 performance['dxgi_claims_during_cv']=dxgi_claims_during_cv
+                performance['dxgi_pre_keydown_deadlines_missed']=dxgi_pre_keydown_deadlines_missed
                 performance['dxgi_active_cv_thread_ms']=_timing_summary(dxgi_active_cv_thread_ms)
                 performance['dxgi_accumulated_frames']=_timing_summary(dxgi_accumulated_frames)
                 performance.update({name:_timing_summary(samples)

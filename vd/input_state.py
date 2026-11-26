@@ -19,3 +19,7 @@ class Keydown:
 
 class InputDisarmed(RuntimeError):
     """The output guard changed after the dispatch gate claimed an attempt."""
+
+
+class InputDeadlineMissed(RuntimeError):
+    """The final input guard finished after a claimed attempt expired."""

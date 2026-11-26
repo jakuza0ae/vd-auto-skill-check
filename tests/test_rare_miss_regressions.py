@@ -10,7 +10,9 @@ import pytest
 from vd import runtime
 from vd.calibration import FreezeObserver
 from vd.capture import Frame
+from vd.dispatch import dispatch
 from vd.engine import Engine
+from vd.input_state import InputDeadlineMissed
 from vd.motion import Motion
 from vd.vision import Arc,Measurement,Needle
 
@@ -310,6 +312,37 @@ def test_dxgi_planned_press_while_cv_is_in_flight(monkeypatch, case):
     assert not missed
     assert [row['kind'] for row in engine.take_events()] == (
         ['PRESS_CLAIM', 'KEYDOWN'] if expected_dispatch else [])
+
+
+def test_dxgi_late_native_input_keeps_the_generation_consumed():
+    engine = Engine(lead_seconds=0, lead_uncertainty=0)
+    engine.target = Arc(40, 10)
+    engine.active = True
+    engine.last_timestamp = 1.0
+    engine.planner.begin(engine.target, 22.5)
+    engine.motion.estimate = Motion(1.0, 22.5, 900, .1, 2, 1.0, 12)
+    plan = engine.planner.update(engine.motion.estimate, frame_at=1.0, now=1.0)
+    frame = Frame(1, None, 1.0, 1.0, 1.0, 'test', False, None, '')
+    capture = SimpleNamespace(cv=threading.Condition(), stopping=False, error=None,
+                              proc=SimpleNamespace(poll=lambda: None), latest=frame)
+    mouse = SimpleNamespace(lock=threading.RLock(), snapshot=lambda: SimpleNamespace(held=True, healthy=True))
+    clock = SimpleNamespace(now=plan.press_at)
+    limits = []
+
+    def pulse_before(deadline):
+        limits.append(deadline)
+        clock.now += .015
+        assert clock.now > deadline
+        raise InputDeadlineMissed()
+
+    output = SimpleNamespace(pulse_before=pulse_before)
+    for _ in range(2):
+        assert dispatch(engine, capture, frame.sequence, mouse=mouse, output=output,
+                        clock=lambda: clock.now) is None
+    assert engine.active and engine.planner.fired
+    assert limits == [plan.latest_press_at]
+    assert [row['kind'] for row in engine.take_events()] == [
+        'PRESS_CLAIM', 'INPUT_DEADLINE_MISSED']
 
 
 @pytest.mark.parametrize(('session','generation'),[

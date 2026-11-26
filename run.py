@@ -212,6 +212,9 @@ def main():
             rows.append(dict(sequence=frame.sequence, media_time=frame.media_time,
                 received_time=frame.received_time, consumed_time=frame.consumed_time,
                 copy_completed_time=frame.copy_completed_time,
+                published_time=frame.published_time,
+                source_acquired_time=frame.source_acquired_time,
+                source_accumulated_frames=frame.source_accumulated_frames,
                 timestamp_kind=frame.timestamp_kind, pts_ns=frame.pts_ns,
                 negotiated_caps=frame.negotiated_caps,
                 capture_source_size=frame.source_size,
@@ -243,6 +246,27 @@ def main():
         worker_exit_code=capture.proc.returncode,
         reader_stopped=not capture.reader.is_alive(),
         rows=rows)
+    if windows_capture:
+        stages = {
+            'present_to_acquire_ms': ('media_time', 'source_acquired_time'),
+            'acquire_to_copy_ms': ('source_acquired_time', 'copy_completed_time'),
+            'copy_to_receive_ms': ('copy_completed_time', 'received_time'),
+            'receive_to_publish_ms': ('received_time', 'published_time'),
+        }
+        samples = {
+            name: [(row[end] - row[start]) * 1000 for row in rows
+                   if row[start] is not None and row[end] is not None]
+            for name, (start, end) in stages.items()
+        }
+        samples['accumulated_frames'] = [row['source_accumulated_frames'] for row in rows
+                                         if row['source_accumulated_frames'] is not None]
+        result['dxgi_capture'] = {
+            name: dict(samples=len(values), p50=statistics.median(values) if values else None,
+                       p95=(statistics.quantiles(values, n=20, method='inclusive')[18]
+                            if len(values) > 1 else (values[0] if values else None)),
+                       max=max(values, default=None))
+            for name, values in samples.items()
+        }
     print(json.dumps({k:v for k,v in result.items() if k!='rows'}, indent=2))
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

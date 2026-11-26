@@ -36,6 +36,8 @@ class Frame:
     copy_completed_time: float | None = None
     published_time: float | None = None
     source_epoch: tuple[int, int] | None = None
+    source_acquired_time: float | None = None
+    source_accumulated_frames: int | None = None
 
 
 def default_roi(source):

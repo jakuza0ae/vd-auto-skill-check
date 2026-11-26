@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -196,7 +197,7 @@ void list_outputs(const std::vector<Device>& devices) {
 
 struct FrameHeader {
     char magic[4] = {'V', 'D', 'D', '1'};
-    UINT32 version = 1;
+    UINT32 version = 2;
     UINT64 sequence = 0;
     UINT64 present_ns = 0;
     UINT64 copied_ns = 0;
@@ -209,9 +210,13 @@ struct FrameHeader {
     INT32 roi_y = 0;
     INT32 source_x = 0;
     INT32 source_y = 0;
+    UINT64 acquired_ns = 0;
+    UINT32 accumulated_frames = 0;
+    UINT32 reserved = 0;
 };
 
-static_assert(sizeof(FrameHeader) == 72, "Windows capture wire header changed");
+static_assert(offsetof(FrameHeader, acquired_ns) == 72 && sizeof(FrameHeader) == 88,
+              "Windows capture wire header changed");
 
 UINT scale_coordinate(UINT value, UINT size, UINT reference_size) {
     return static_cast<UINT>((static_cast<UINT64>(value) * size + reference_size / 2) / reference_size);
@@ -393,7 +398,8 @@ void capture(const Options& options, const Device& adapter, const Output& output
     const D3D11_BOX region{static_cast<UINT>(header.roi_x), static_cast<UINT>(header.roi_y), 0,
                            header.roi_x + header.roi_width, header.roi_y + header.roi_height, 1};
     const size_t row_bytes = static_cast<size_t>(header.roi_width) * 4;
-    std::vector<unsigned char> pixels(row_bytes * header.roi_height);
+    std::vector<unsigned char> packet(sizeof(header) + row_bytes * header.roi_height);
+    auto* pixels = packet.data() + sizeof(header);
 
     LARGE_INTEGER frequency{};
     if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) {
@@ -433,15 +439,17 @@ void capture(const Options& options, const Device& adapter, const Output& output
         check(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped), "Map ROI staging texture");
         const auto* data = static_cast<const unsigned char*>(mapped.pData);
         for (UINT y = 0; y < header.roi_height; ++y) {
-            std::memcpy(pixels.data() + y * row_bytes, data + y * static_cast<size_t>(mapped.RowPitch), row_bytes);
+            std::memcpy(pixels + y * row_bytes, data + y * static_cast<size_t>(mapped.RowPitch), row_bytes);
         }
         context->Unmap(staging.Get(), 0);
         const auto copied = qpc_now();
 
         header.present_ns = qpc_nanoseconds(present, frequency.QuadPart);
+        header.acquired_ns = qpc_nanoseconds(acquired, frequency.QuadPart);
         header.copied_ns = qpc_nanoseconds(copied, frequency.QuadPart);
-        if (!write_pipe(pipe, &header, sizeof(header)) ||
-            !write_pipe(pipe, pixels.data(), static_cast<DWORD>(pixels.size()))) {
+        header.accumulated_frames = frame.AccumulatedFrames;
+        std::memcpy(packet.data(), &header, sizeof(header));
+        if (!write_pipe(pipe, packet.data(), static_cast<DWORD>(packet.size()))) {
             return;
         }
         ++header.sequence;

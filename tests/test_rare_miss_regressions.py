@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from concurrent.futures import Future
 import json
 import threading
 from pathlib import Path
@@ -198,7 +199,7 @@ def test_dxgi_runtime_dispatches_due_prediction_after_capture_timeout(
     clock = SimpleNamespace(now=1.0)
     monkeypatch.setattr(runtime, 'time', SimpleNamespace(
         monotonic=lambda: clock.now, perf_counter=lambda: clock.now,
-        process_time=lambda: 0.0))
+        process_time=lambda: 0.0, sleep=lambda _: None))
     capture = SimpleNamespace(cv=threading.Condition(), stopping=False, error=None,
                               proc=SimpleNamespace(poll=lambda: None), latest=None)
     image = SimpleNamespace(shape=(240, 320, 3))
@@ -249,6 +250,45 @@ def test_dxgi_runtime_dispatches_due_prediction_after_capture_timeout(
     if same_source:
         assert claims[0]['at'] == pytest.approx(1.051)
         assert claims[0]['plan']['timing_mode'] == 'PREDICTED'
+
+
+def test_dxgi_planned_press_runs_while_cv_is_still_in_flight(monkeypatch):
+    clock = SimpleNamespace(now=1.0)
+    frame = Frame(1, None, 1.0, 1.0, 1.0, 'test', False, None, '',
+                  source_epoch=(41, 1), source_generation=1)
+    capture = SimpleNamespace(cv=threading.Condition(), stopping=False, error=None,
+                              proc=SimpleNamespace(poll=lambda: None), latest=frame)
+    engine = Engine(lead_seconds=0, lead_uncertainty=0)
+    engine.target = Arc(40, 10)
+    engine.active = True
+    engine.last_timestamp = frame.media_time
+    engine.planner.begin(engine.target, 22.5)
+    engine.motion.estimate = Motion(1.0, 22.5, 900, .1, 2, 1.0, 12)
+    plan = engine.planner.update(engine.motion.estimate, frame_at=1.0, now=1.0)
+    future = Future()
+    measurement = Measurement(1.0, None, 0, None, None, (), 'NO_PROMPT')
+    missed = []
+
+    def sleep(seconds):
+        clock.now += max(seconds, .0001)
+        if clock.now >= 1.065:
+            missed.append(True)
+            future.set_result((measurement, 65, 4))
+
+    def pulse():
+        assert not future.done()
+        assert clock.now == pytest.approx(plan.press_at, abs=.0001)
+        future.set_result((measurement, 65, 4))
+        return SimpleNamespace(requested_at=clock.now, syn_completed_at=clock.now)
+
+    monkeypatch.setattr(runtime, 'time', SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    mouse = SimpleNamespace(lock=threading.RLock(), snapshot=lambda: SimpleNamespace(held=True, healthy=True))
+    result = runtime._wait_for_dxgi_measurement(future, engine, capture, frame, mouse=mouse,
+        output=SimpleNamespace(pulse=pulse), stop_at=None)
+
+    assert result == (measurement, 65, 4, True)
+    assert not missed
+    assert [row['kind'] for row in engine.take_events()] == ['PRESS_CLAIM', 'KEYDOWN']
 
 
 @pytest.mark.parametrize(('session','generation'),[

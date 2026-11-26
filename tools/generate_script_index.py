@@ -9,7 +9,7 @@ from pathlib import Path
 
 EXCLUDED={'.git','.venv','.pytest_cache','__pycache__','node_modules','build',
           'recordings','oldrecordings','reports','assets'}
-KINDS={'.py':'Python','.sh':'Shell','.cmd':'Windows batch','.cpp':'C++','.h':'C++ header','.c':'C',
+KINDS={'.py':'Python','.sh':'Shell','.cmd':'Windows batch','.ps1':'PowerShell','.cpp':'C++','.h':'C++ header','.c':'C',
        '.cjs':'JavaScript test','.html':'Browser app','.lua':'Luau','.luau':'Luau'}
 
 

@@ -137,7 +137,7 @@ class _PromptFrame:
 
 class Detector:
     def __init__(self, template=None, ring_radius=66.0, *, roi_offset=(0, 0),
-                 ui_scale=1.0):
+                 ui_scale=1.0, acquisition_center=None):
         assets = Path(__file__).resolve().parents[1] / 'assets'
         # Both prompt canvases are aligned to the ring center. The update's
         # jagged key outline coexists with the legacy Space icon in replays.
@@ -163,6 +163,10 @@ class Detector:
                                      for prompt in self.templates)
         self.ring_radius = float(ring_radius)*self.ui_scale
         self.roi_offset = tuple(roi_offset)
+        offset_x, offset_y = self.roi_offset
+        self._acquisition_centers = ((tuple(acquisition_center),) if acquisition_center is not None
+                                     else ((160-offset_x,162.5-offset_y),
+                                           (170-offset_x,82.5-offset_y)))
         self.angles = np.arange(720, dtype=np.float32) * (math.pi / 360)
         self._cos=np.cos(self.angles)[:,None]
         self._sin=np.sin(self.angles)[:,None]
@@ -211,13 +215,10 @@ class Detector:
             raise ValueError('ROI is smaller than prompt template')
         score=-1.0
         prompt_center=None
-        # The 1080p capture ROI has two observed prompt positions. Searching
-        # only their small neighborhoods avoids a full ROI scan every frame.
-        offset_x, offset_y = self.roi_offset
+        # Search the observed positions for this backend before looking across the ROI.
         for template in self.templates:
             th,tw=template.shape
-            for candidate in dict.fromkeys((center_hint,
-                    (160-offset_x,162.5-offset_y),(170-offset_x,82.5-offset_y))):
+            for candidate in dict.fromkeys((center_hint,*self._acquisition_centers)):
                 if candidate is None:
                     continue
                 left=round(candidate[0]-tw/2)
@@ -232,7 +233,7 @@ class Detector:
                 if value>score:
                     score=value
                     prompt_center=(x0+local[0]+tw/2,y0+local[1]+th/2)
-                if candidate==center_hint and value>=.90:
+                if value>=.90 and (candidate==center_hint or len(self._acquisition_centers)==1):
                     break
             if score>=.90:
                 break
@@ -258,9 +259,10 @@ class Detector:
         ring = self._sample(frame,center,self._ring_radii)
         levels = ring.mean(axis=1)
         intensity = levels.mean(axis=1)
-        white_threshold = min(185, max(160, float(np.median(intensity))+40))
+        background = float(np.median(intensity))
+        white_threshold = min(185, max(160, background+40))
         white_score = np.minimum(intensity-white_threshold, levels.min(axis=1)-150)
-        black_threshold = max(42, min(55, float(np.median(intensity))-40))
+        black_threshold = max(42, min(55, background-40))
         whites = arcs_from_score(white_score, 5, 16)
         blacks = arcs_from_score(black_threshold-intensity, 18, 65)
         pairs = [(a,b) for a in whites for b in blacks

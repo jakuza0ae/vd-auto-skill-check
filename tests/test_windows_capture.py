@@ -54,16 +54,30 @@ def fake_helper(monkeypatch, tmp_path):
 
 
 def packet(sequence=0, *, source_size=(1920, 1080), roi=(800, 420, 320, 240),
-           source_origin=(0, 0), monitor=42, present_ns=None, copy_ns=None):
+           source_origin=(0, 0), monitor=42, present_ns=None, copy_ns=None,
+           acquired_ns=None):
     now = time.monotonic_ns()
     present_ns = now - 10_000_000 if present_ns is None else present_ns
     copy_ns = now - 7_000_000 if copy_ns is None else copy_ns
     x, y, width, height = roi
     header = _HEADER.pack(
-        b'VDD1', 1, sequence, present_ns, copy_ns, monitor, *source_size,
+        b'VDD1', 1 if acquired_ns is None else 2, sequence, present_ns, copy_ns, monitor, *source_size,
         width, height, x, y, *source_origin,
     )
-    return header + bytes((7, 13, 19, 0)) * (width * height)
+    timing = b'' if acquired_ns is None else struct.pack('<QI4x', acquired_ns, 3)
+    return header + timing + bytes((7, 13, 19, 0)) * (width * height)
+
+
+def test_dxgi_v2_packet_separates_acquisition_and_copy(fake_helper):
+    _, emit = fake_helper
+    with windows_capture.WindowsCapture() as capture:
+        now = time.monotonic_ns()
+        emit(packet(present_ns=now-10_000_000, acquired_ns=now-8_000_000,
+                    copy_ns=now-7_000_000))
+        frame = capture.next(timeout=4)
+        assert frame.source_acquired_time == (now-8_000_000)/1e9
+        assert frame.source_accumulated_frames == 3
+        assert tuple(frame.image[0, 0]) == (7, 13, 19)
 
 
 @pytest.mark.parametrize(
@@ -131,10 +145,11 @@ def test_1366_capture_enables_fallback_only_with_uncropped_geometry(fake_helper,
 
 
 @pytest.mark.parametrize('publish_frame', [False, True])
-def test_capture_wait_reserves_last_millisecond_for_dispatch(monkeypatch, publish_frame):
+def test_capture_wait_switches_to_precise_sleep_before_dispatch(monkeypatch, publish_frame):
     now = 20.0
-    press_at = now + .010
+    press_at = now + .023
     waits = []
+    sleeps = []
     newest = SimpleNamespace(sequence=1)
 
     def clock():
@@ -155,9 +170,14 @@ def test_capture_wait_reserves_last_millisecond_for_dispatch(monkeypatch, publis
         def wait(self, seconds):
             nonlocal now
             waits.append(seconds)
-            now += seconds + .0007
+            now += seconds + .0156
 
-    monkeypatch.setattr(windows_capture, 'time', SimpleNamespace(monotonic=clock))
+    def sleep(seconds):
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(windows_capture, 'time', SimpleNamespace(monotonic=clock, sleep=sleep))
     capture = windows_capture.WindowsCapture.__new__(windows_capture.WindowsCapture)
     capture.cv = CoarseCondition()
     capture.error = None
@@ -165,8 +185,9 @@ def test_capture_wait_reserves_last_millisecond_for_dispatch(monkeypatch, publis
     capture.latest = None
     capture.set_dispatch_deadline(press_at)
 
-    assert capture.next(after=0, timeout=.010) is (newest if publish_frame else None)
-    assert waits and max(waits) <= .009
+    assert capture.next(after=0, timeout=.023) is (newest if publish_frame else None)
+    assert waits and max(waits) < .0061
+    assert sleeps and max(sleeps) <= .001
     if publish_frame:
         assert now < press_at
     else:

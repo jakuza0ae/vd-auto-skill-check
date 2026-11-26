@@ -17,10 +17,11 @@ CHAIN_FAST_SHIFT_DEGREES=25
 
 class Engine:
     def __init__(self, *, lead_seconds=DEFAULT_RESPONSE_DELAY_SECONDS, lead_uncertainty=.020,
-                 absence_seconds=.12):
+                 absence_seconds=.12, seed_confirmed_motion=False):
         self.planner=Planner(lead_seconds=lead_seconds,lead_uncertainty=lead_uncertainty)
         self.motion=MotionTracker()
         self.absence_seconds=absence_seconds
+        self.seed_confirmed_motion=seed_confirmed_motion
         self.active=False
         self.center=None
         self.target=None
@@ -137,7 +138,7 @@ class Engine:
                 if (not pending_matches or self.pending_at is None
                         or m.timestamp-self.pending_at>self.motion.max_gap):
                     first=max(m.candidates,key=lambda c:c.contrast,default=None)
-                    self.pending=(m.great,m.center,first.angle if first else None)
+                    self.pending=(m.great,m.center,first,len(m.candidates)==1)
                     self.pending_at=m.timestamp
                     return
                 if m.timestamp-self.pending_at<.012:
@@ -150,7 +151,8 @@ class Engine:
             self.target=m.great
             self.good=m.good
             self.center=m.center
-            initial=(self.pending[2] if pending_matches and self.pending[2] is not None else
+            first=self.pending[2] if pending_matches else None
+            initial=(first.angle if first is not None else
                      strongest.angle if strongest is not None else m.great.center)
             occurrence_start=None
             if continuing_chain:
@@ -166,7 +168,11 @@ class Engine:
                                occurrence_start=occurrence_start)
             if not continuing_chain:
                 self.motion.reset()
-                self.motion.unwrap_floor=initial
+                if (self.seed_confirmed_motion and first is not None and self.pending[3]
+                        and len(m.candidates)==1 and now-self.pending_at<=self.planner.max_age):
+                    self.motion.update(self.pending_at,(first,))
+                else:
+                    self.motion.unwrap_floor=initial
                 self.last_reliable_motion_at=None
             self.active=True
             self.started_at=m.timestamp

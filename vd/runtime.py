@@ -1,5 +1,6 @@
 """Independent capture/CV/engine integration. No physical input in dry-run."""
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import asdict, replace
 import json
@@ -89,6 +90,38 @@ def _service_timer_before_cv(engine,capture,sequence,*,mouse,output,cv_budget,st
     return True
 
 
+def _measure_dxgi(detector, frame, center):
+    started = time.perf_counter()
+    cpu_started = thread_time_ns()
+    measurement = detector.measure(frame.image, frame.media_time, center_hint=center)
+    return measurement, (time.perf_counter() - started) * 1000, (thread_time_ns() - cpu_started) / 1e6
+
+
+def _wait_for_dxgi_measurement(future, engine, capture, frame, *, mouse, output, stop_at):
+    """Keep engine ownership on the runtime thread while a measured frame is in flight."""
+    plan = engine.planner.current
+    stop = min(plan.press_at + .005, plan.valid_until, plan.latest_press_at)
+    if stop_at is not None:
+        stop = min(stop, stop_at)
+    dispatched = False
+    while True:
+        now = time.monotonic()
+        if now > stop or engine.planner.current is not plan:
+            break
+        remaining = plan.press_at - now
+        if remaining <= 0:
+            dispatched = dispatch(engine, capture, frame.sequence, mouse=mouse, output=output,
+                                  clock=time.monotonic, same_source_as=frame) is not None
+            if engine.reason != 'CAPTURE_WRITING':
+                break
+        if future.done():
+            break
+        # CPython uses a high-resolution Windows timer for time.sleep().
+        # Yield to the reader and CV threads close to the deadline.
+        time.sleep(min(.001, max(0, remaining - .0005)))
+    return (*future.result(), dispatched)
+
+
 def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncertainty,
                 physical=False, learn_lead=False, recording=True,
                 capture_priority=5, variant='baseline', capture_source='monitor',
@@ -97,7 +130,9 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
         raise ValueError('Physical input is forbidden for synthetic capture')
     if learn_lead and not physical:
         raise ValueError('Learning requires physical input observations')
-    engine=Engine(lead_seconds=lead_seconds,lead_uncertainty=lead_uncertainty)
+    windows_capture=capture_source=='dxgi'
+    engine=Engine(lead_seconds=lead_seconds,lead_uncertainty=lead_uncertainty,
+                  seed_confirmed_motion=windows_capture)
     detector=None
     reasons=Counter()
     measurement_reasons=Counter()
@@ -109,10 +144,10 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
     keydowns=0
     deadline_cv_deferrals=0
     dxgi_stale_before_cv=0
+    dxgi_claims_during_cv=0
     mouse=None
     output=None
     mode='run' if physical else 'dry-run'
-    windows_capture=capture_source=='dxgi'
     held_source=('win32' if windows_capture else 'evdev') if physical else 'assumed_for_dry_run'
     observer=None
     observer_generation=None
@@ -124,11 +159,17 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
     active_source_age_ms=deque(maxlen=600)
     active_cv_ms=deque(maxlen=600)
     dxgi_active_cv_thread_ms=deque(maxlen=600)
+    dxgi_accumulated_frames=deque(maxlen=600)
+    dxgi_dispatch_parts={name:deque(maxlen=600) for name in (
+        'dxgi_schedule_lag_ms','dxgi_pre_keydown_ms','dxgi_sendinput_ms',
+        'dxgi_predicted_center_offset_ms',
+    )} if windows_capture else {}
     frame_delivery_gap_ms=deque(maxlen=600)
     frame_age_ms=deque(maxlen=600)
     capture_pipe_age_ms=deque(maxlen=600)
     dxgi_capture_parts={name:deque(maxlen=600) for name in (
-        'dxgi_present_to_copy_ms','dxgi_copy_to_receive_ms','dxgi_receive_to_publish_ms'
+        'dxgi_present_to_copy_ms','dxgi_copy_to_receive_ms','dxgi_receive_to_publish_ms',
+        'dxgi_present_to_acquire_ms','dxgi_acquire_to_copy_ms',
     )} if windows_capture else {}
     capture_worker_cpu_percent=deque(maxlen=600)
     lifetime_max={}
@@ -150,6 +191,7 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                 video_sampling=('full_rate_during_check_1fps_while_idle'
                                 if video_recording else 'disabled'),
                 held_source=held_source,
+                seed_confirmed_motion=windows_capture,
                 game_outcome_measured=False),record_video=video_recording))
         else:
             recorder=_NullRecorder()
@@ -175,6 +217,16 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                     presses+=1
                 if event['kind']=='KEYDOWN':
                     keydowns+=1
+                    if windows_capture:
+                        parts = (('dxgi_schedule_lag_ms', event['claimed_at']-event['plan']['press_at']),
+                                 ('dxgi_pre_keydown_ms', event['requested_at']-event['claimed_at']),
+                                 ('dxgi_sendinput_ms', event['at']-event['requested_at']))
+                        if event['plan']['timing_mode']=='PREDICTED':
+                            parts += (('dxgi_predicted_center_offset_ms',
+                                       event['at']-event['plan']['intended_press_at']
+                                       -event['timing_components']['dispatch_delay']),)
+                        for name, delta in parts:
+                            _record_sample(dxgi_dispatch_parts[name], name, delta*1000, lifetime_max)
                     observer_dispatch_lag=max(
                         0.0,event['at']-event['plan']['intended_press_at'])
                     clean_deadline=(abs(event['plan']['press_at']
@@ -195,7 +247,8 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                             good=Arc(**event['good']) if event['good'] else None,
                             chain=event['chain'],late_dispatch=event['outside_target_window'])
                         observer_generation=event['generation']
-                print(json.dumps(event),flush=True)
+                if not windows_capture or not recording:
+                    print(json.dumps(event),flush=True)
                 if event['kind']=='END' and observer is not None and observer_generation==event['generation']:
                     landing=replace(observer.finish(event['reason']),
                                     dispatch_lag=observer_dispatch_lag)
@@ -207,7 +260,8 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                         response_delay=lead_seconds,response_uncertainty=lead_uncertainty,
                         dispatch_delay=estimator.lead,dispatch_uncertainty=estimator.uncertainty)
                     recorder.event(diagnostic)
-                    print(json.dumps(diagnostic),flush=True)
+                    if not windows_capture or not recording:
+                        print(json.dumps(diagnostic),flush=True)
                     observer=None
                     observer_dispatch_lag=0.0
                     observer_calibration_applied=False
@@ -232,6 +286,11 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
             detector_options=dict(
                 roi_offset=REGION_ROI_OFFSET if capture_source=='region' else (0,0),
                 ui_scale=ui_scale)
+            if windows_capture:
+                height, width = frame.image.shape[:2]
+                acquisition_center = (width/2, height/2)
+                detector_options['acquisition_center'] = acquisition_center
+                recorder.metadata['detector_acquisition_center'] = acquisition_center
             alternate_ui_scale=getattr(capture,'alternate_ui_scale',None)
             if alternate_ui_scale is None:
                 detector=Detector(**detector_options)
@@ -263,6 +322,8 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                     ) from exc
                 mouse=stack.enter_context(MouseMonitor())
                 output=stack.enter_context(SpaceOutput())
+            cv_worker = stack.enter_context(ThreadPoolExecutor(max_workers=1,
+                thread_name_prefix='VD-DXGI-vision')) if windows_capture else None
             until=None if seconds is None else time.monotonic()+seconds
             while until is None or time.monotonic()<until:
                 if output is not None and output.error:
@@ -272,13 +333,17 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                     frame_started=time.perf_counter()
                     if windows_capture:
                         last_dxgi_frame=frame
-                        stamps=(frame.media_time,frame.copy_completed_time,
-                                frame.received_time,frame.published_time)
-                        if all(stamp is not None for stamp in stamps):
-                            for (name,samples),start,end in zip(dxgi_capture_parts.items(),
-                                                              stamps,stamps[1:]):
-                                if end>=start:
-                                    _record_sample(samples,name,(end-start)*1000,lifetime_max)
+                        pairs=((frame.media_time,frame.copy_completed_time),
+                               (frame.copy_completed_time,frame.received_time),
+                               (frame.received_time,frame.published_time),
+                               (frame.media_time,frame.source_acquired_time),
+                               (frame.source_acquired_time,frame.copy_completed_time))
+                        for (name,samples),(start,end) in zip(dxgi_capture_parts.items(),pairs):
+                            if start is not None and end is not None and end>=start:
+                                _record_sample(samples,name,(end-start)*1000,lifetime_max)
+                        if frame.source_accumulated_frames is not None:
+                            _record_sample(dxgi_accumulated_frames,'dxgi_accumulated_frames',
+                                           frame.source_accumulated_frames,lifetime_max)
                     if previous_received_time is not None:
                         _record_sample(frame_delivery_gap_ms,'frame_delivery_gap_ms',
                             max(0,(frame.received_time-previous_received_time)*1000),
@@ -318,10 +383,9 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                     elif frame.media_time is None:
                         engine.cancel('NO_MEDIA_TIMESTAMP',time.monotonic())
                     else:
-                        cv_budget=_cv_budget_seconds(active_cv_ms,windows_capture=windows_capture)
-                        if _service_timer_before_cv(engine,capture,last,mouse=mouse,output=output,
-                                cv_budget=cv_budget,stop_at=until,
-                                dxgi_frame=frame if windows_capture else None):
+                        if not windows_capture and _service_timer_before_cv(engine,capture,last,
+                                mouse=mouse,output=output,stop_at=until,
+                                cv_budget=_cv_budget_seconds(active_cv_ms,windows_capture=False)):
                             deadline_cv_deferrals+=1
                             events()
                         now=time.monotonic()
@@ -330,13 +394,26 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                             dxgi_stale_before_cv+=1
                             cv_elapsed_ms=None
                             m=Measurement(frame.media_time,None,0,None,None,(),'STALE_FRAME')
+                        elif windows_capture:
+                            plan = engine.planner.current
+                            if (plan is not None and plan.timing_mode=='PREDICTED'
+                                    and plan.press_at<=plan.valid_until):
+                                future = cv_worker.submit(_measure_dxgi, detector, frame, engine.center)
+                                m,cv_elapsed_ms,cv_thread_ms,serviced = _wait_for_dxgi_measurement(
+                                    future,engine,capture,frame,mouse=mouse,output=output,stop_at=until)
+                                dxgi_claims_during_cv+=int(serviced)
+                                if serviced:
+                                    events()
+                            else:
+                                m,cv_elapsed_ms,cv_thread_ms = _measure_dxgi(detector, frame, engine.center)
+                            m=retained_target(m,great=engine.target,good=engine.good,center=engine.center)
+                            now=time.monotonic()
+                            if until is not None and now>=until:
+                                break
                         else:
-                            thread_started=thread_time_ns() if windows_capture else None
                             cv_started=time.perf_counter()
                             m=detector.measure(frame.image,frame.media_time,center_hint=engine.center)
                             cv_elapsed_ms=(time.perf_counter()-cv_started)*1000
-                            if thread_started is not None:
-                                cv_thread_ms=(thread_time_ns()-thread_started)/1e6
                             m=retained_target(m,great=engine.target,good=engine.good,center=engine.center)
                             now=time.monotonic()
                         measurement_reasons[m.reason]+=1
@@ -354,7 +431,8 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
                                                cv_thread_ms,lifetime_max)
                             _record_sample(active_source_age_ms,'active_source_age_ms',
                                 max(0,(now-frame.media_time)*1000),lifetime_max)
-                        dispatch(engine,capture,last,mouse=mouse,output=output,clock=time.monotonic)
+                        dispatch(engine,capture,last,mouse=mouse,output=output,clock=time.monotonic,
+                                 same_source_as=frame if windows_capture else None)
                     decision_time=time.monotonic()
                     state=engine.snapshot()
                     state['timing_components']=timing_components()
@@ -416,9 +494,12 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
             performance['deadline_cv_deferrals']=deadline_cv_deferrals
             if windows_capture:
                 performance['dxgi_stale_before_cv']=dxgi_stale_before_cv
+                performance['dxgi_claims_during_cv']=dxgi_claims_during_cv
                 performance['dxgi_active_cv_thread_ms']=_timing_summary(dxgi_active_cv_thread_ms)
+                performance['dxgi_accumulated_frames']=_timing_summary(dxgi_accumulated_frames)
                 performance.update({name:_timing_summary(samples)
-                                    for name,samples in dxgi_capture_parts.items()})
+                                    for parts in (dxgi_capture_parts, dxgi_dispatch_parts)
+                                    for name,samples in parts.items()})
             recorder.metadata['performance']=performance
             recorder.metadata['final_lead_estimate']=dict(lead=estimator.lead,
                 uncertainty=estimator.uncertainty,reason=estimator.reason,
@@ -440,10 +521,13 @@ def run_session(*, seconds, synthetic, fps, directory, lead_seconds, lead_uncert
 def replay(directory):
     manifest=json.loads((Path(directory)/'manifest.json').read_text())
     engine=Engine(lead_seconds=manifest['lead_seconds'],
-                  lead_uncertainty=manifest['lead_uncertainty'])
+                  lead_uncertainty=manifest['lead_uncertainty'],
+                  seed_confirmed_motion=manifest.get('seed_confirmed_motion',False))
     detector_options=dict(roi_offset=tuple(manifest.get('detector_roi_offset',(0,0))))
     if manifest.get('detector_ui_scale',1.0)!=1.0:
         detector_options['ui_scale']=manifest['detector_ui_scale']
+    if manifest.get('detector_acquisition_center') is not None:
+        detector_options['acquisition_center']=manifest['detector_acquisition_center']
     alternate_ui_scale=manifest.get('detector_alternate_ui_scale')
     detector=(Detector(**detector_options) if alternate_ui_scale is None else
               ScaleFallbackDetector(alternate_ui_scale,**detector_options))

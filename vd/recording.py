@@ -93,6 +93,8 @@ class Recorder:
                  source_present_id=getattr(frame,'source_present_id',None),
                  source_generation=getattr(frame,'source_generation',None),
                  source_epoch=getattr(frame,'source_epoch',None),
+                 source_acquired_time=getattr(frame,'source_acquired_time',None),
+                 source_accumulated_frames=getattr(frame,'source_accumulated_frames',None),
                  copy_completed_time=getattr(frame,'copy_completed_time',None),
                  published_time=getattr(frame,'published_time',None))
         try:

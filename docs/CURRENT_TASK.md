@@ -1,66 +1,30 @@
-# Current task — Windows solver, 2026-11-23
+# Current task — Windows solver, 2026-11-26
 
-- `run.py` selects DXGI on Windows with a default 60 FPS limit and explicit
-  adapter/display selection. `capture-probe` reports received FPS, p95 desktop
-  frame age and median age at ROI copy. `dry-run` runs the detector without
-  opening input. Linux launchers still select their existing backends.
-- `native/windows_capture.cpp`, `native/build_windows_capture.cmd` and
-  `vd/windows_capture.py` implement center ROI capture over a pipe, QPC
-  timestamps for desktop updates and capture invalidation on geometry changes.
-  `vd/windows_input.py` and the final dispatch gate bind a held LMB to the
-  foreground Roblox player on the captured monitor. The same GREAT planner is
-  shared by both platforms.
-- `vd/preflight.py`, `requirements.txt`, `vd/image_io.py`, `vd/vision.py` and
-  `vd/recording.py` cover the Windows setup, Unicode image paths and platform
-  differences in input dependencies and process priority. README has setup and
-  passive checks. The script index includes Windows batch files.
-- Verified with a strict MinGW x64 build and on Windows CPython 3.14 under Wine.
-  59 Wine tests passed and one Windows FFmpeg CLI case was deselected. The
-  native helper listed the test display. DXGI capture correctly reported the
-  Wine `E_NOTIMPL` error and cleaned up the helper process.
-- Linux full suite passed with 338 tests and one Windows-only skip. The
-  synthetic portal probe produced frames and stopped its worker and reader.
-- Windows capture now reserves the final millisecond before a scheduled press
-  for bounded polling between frames. The reader can still publish a frame in
-  that interval. Ordinary capture waits continue to block on the condition.
-- A user's Windows tester confirmed live desktop frames at 1366×768 in beta 1.
-  The session ended with `DXGI_ERROR_ACCESS_LOST`. The manifest recorded zero
-  input events. The cause of an accompanying Roblox crash is unverified.
-- The beta 2 default crop keeps at least 320×240 physical pixels on smaller
-  displays that can fit it. The detector tries the viewport scale during
-  acquisition if the native pixel scale fails, and keeps the accepted scale
-  through tracking. At 1366×768 the original crop missed the fixed-size prompt
-  in the screenshot fixture. Both scaled and fixed-pixel fixtures now detect it.
-- Live beta 2 archived capture at 1366×768 has 55 positive detector frames out
-  of 221 samples. In a separate run Windows accepted one virtual-key Space
-  invocation, but the tester saw no game response. That attempt also logged
-  `GREAT_PASSED`. Neither the cause of the missing response nor the live grade
-  was established.
-- Beta 3 uses Win32 scan code 0x39 and holds Space for 80 ms. The tester
-  confirmed the game reacts to input. The report contains nine keydowns, four
-  last-chance attempts and a 52.4 ms active CV p95. Exact in-game grades remain
-  unverified.
-- Beta 4 uses the recent CV p95 to reserve up to 60 ms before a Windows
-  deadline. A newer complete DXGI frame of the same epoch and generation can
-  validate a due prediction within its existing window. Source freshness,
-  publication and LMB are checked before dispatch. A fake-clock regression
-  models the old 12 ms limit missing a deadline 25 ms away. Live beta 4
-  accuracy still needs verification.
-- A beta 4 Windows report recorded two last-chance attempts, 54.8 ms active
-  CV p95 and 116.0 ms active source-age p95. One press took 10.5 ms inside
-  Win32. The data did not establish a game response delay or a GPU bottleneck.
-- Beta 5 skips frames already past the 80 ms freshness gate before DXGI CV.
-  The timeout branch validates any newly published frame against the same
-  source before claiming a due prediction. Windows reports timing for DXGI
-  present-to-copy, copy-to-receive, receive-to-publish and the detector thread.
-  On 221 archived DXGI frames, shared prompt preprocessing and less temporary
-  array allocation kept all measurements identical across acquisition and
-  tracking passes. The local full-frame acquisition p95 fell from 4.42 to
-  4.18 ms. The benefit on the tester's PC remains unmeasured.
-- Windows distribution uses the `v0.1.0-beta.5` release and its portable ZIP.
-  `tools/build_windows_release.py` bundles pinned Windows wheels, embedded
-  CPython and the built DXGI worker. `vd.cmd` runs the CLI with bundled Python.
-  README includes a PowerShell download with SHA-256 verification.
+- Last available tester run reports 24.8 ms median and 69.4 ms p95 frame
+  delivery gaps, 65.5 ms active CV wall p95 and 117.7 ms active source-age
+  p95. The report named beta.5 lacks beta.5-specific timing fields, so its
+  exact revision is unverified. Neither old logs nor local CV imply live grades.
+- On 221 archived Windows ROI images, acquisition CPU p95 fell from 3.22 to
+  2.49 ms on Linux using a centered Windows prompt search before full search.
+  All 55 accepted centers, arcs and needle measurements matched. Correlation
+  scores can change slightly due to cropped versus full OpenCV matching.
+  Historical replay attribution put engine and planner CPU work below 0.08 ms
+  p95. [fast-anything](https://github.com/EL4CTEO/fast-anything) and
+  [rust-anything](https://github.com/erkamyaman/rust-anything) were reviewed.
+  Rust replacement of the planner has little headroom at the measured cost.
+- Windows runs one CV call in parallel with an outstanding GREAT timer.
+  Capture waits use high-resolution sleeps near a deadline. During initial
+  geometry confirmation, unambiguous needles in two fresh frames can establish
+  motion. The final source/freshness/focus/LMB checks remain in the dispatch
+  path. The default game response stays provisional at 4 ms.
+- The DXGI worker reports present, acquire and copy timestamps and accumulated
+  frames. Manifests also report pipe and publication delays, CV wall/thread
+  CPU, dispatch wake lag, final key gate and SendInput. Scheduled errors are
+  model estimates. Actual center accuracy still needs the Windows tester.
+- The beta.6 launcher installs and verifies a portable user-local ZIP and starts
+  the solver when pasted into PowerShell. GitHub Actions builds with MSVC and
+  tests installer preflight on Windows. Verify a live run using visible grades
+  and the matching event/manifest pair.
 
 ## Earlier task — updated prompt, 2026-10-24
 

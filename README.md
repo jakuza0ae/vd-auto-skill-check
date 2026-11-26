@@ -27,53 +27,33 @@ late attempt at GREAT; its actual outcome can be GREAT, GOOD or MISS.
 
 ## Start on Windows
 
-The [Windows x64 pre-release](https://github.com/jakuza0ae/vd-auto-skill-check/releases/tag/v0.1.0-beta.5)
-includes Python, OpenCV and the DXGI worker. On Windows 10 or 11, download
-`vd-windows-x64.zip`, extract it and open PowerShell in the extracted folder.
-Run `./vd.cmd preflight` to check the installation.
-
-You can also paste this block into PowerShell to download, verify, extract and
-check the same release in your user folder. It installs on a per-user basis.
+Paste this one command into **PowerShell** on Windows 10 or 11 x64. It installs
+beta 6 to your user folder, checks the package and starts the solver in the
+same console. The portable package includes Python, OpenCV and the DXGI
+worker. [Windows release](https://github.com/jakuza0ae/vd-auto-skill-check/releases/tag/v0.1.0-beta.6)
 
 ```powershell
-& {
-    $ErrorActionPreference = 'Stop'
-    $tag = 'v0.1.0-beta.5'
-    $base = "https://github.com/jakuza0ae/vd-auto-skill-check/releases/download/$tag"
-    $dir = Join-Path $env:LOCALAPPDATA "VD-Solver\$tag"
-    $zip = Join-Path $env:TEMP ("vd-{0}.zip" -f [guid]::NewGuid())
-    try {
-        Invoke-WebRequest -UseBasicParsing "$base/vd-windows-x64.zip" -OutFile $zip
-        Invoke-WebRequest -UseBasicParsing "$base/vd-windows-x64.zip.sha256" -OutFile "$zip.sha256"
-        $hash = (Get-Content -LiteralPath "$zip.sha256" -TotalCount 1).Split(' ')[0]
-        if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $hash) { throw 'VD download checksum mismatch.' }
-        Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
-        & "$dir\vd.cmd" preflight
-        if ($LASTEXITCODE -ne 0) { throw 'VD preflight failed.' }
-    } finally {
-        Remove-Item -LiteralPath $zip,"$zip.sha256" -ErrorAction SilentlyContinue
-    }
-}
+& { $ErrorActionPreference='Stop'; $tag='v0.1.0-beta.6'; $script=Join-Path $env:TEMP ("vd-"+[guid]::NewGuid()+".ps1"); try { Invoke-WebRequest -UseBasicParsing "https://github.com/jakuza0ae/vd-auto-skill-check/releases/download/$tag/install-windows.ps1" -OutFile $script; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -Tag $tag; if ($LASTEXITCODE -ne 0) { throw "VD launcher exited with code $LASTEXITCODE." } } finally { Remove-Item -LiteralPath $script -ErrorAction SilentlyContinue } }
 ```
 
-Put Roblox fullscreen on the display you want to capture. The primary display
-is selected by default. The first two commands below only observe the display.
-Keep moving content visible during the probe so Windows supplies new frames.
-Use `run` to enable Space output while LMB is held and Roblox is in the
-foreground on the captured display. Ctrl+C stops the solver.
+Switch to fullscreen Roblox on the primary display and hold LMB to activate
+Space output. Ctrl+C stops the solver. The console shows the recording folder.
+For a timing test, keep event recording on, note visible GREAT/GOOD/MISS results
+and send the run's `manifest.json` and `events.jsonl` along with those results.
+The manifest separates the planned deadline, keydown and capture stages. Actual
+game grades and distance from the center require video or direct observation.
+
+You can also download and extract `vd-windows-x64.zip` manually. From the
+extracted folder, the first three commands below run without keyboard input.
+Keep moving content visible during the capture probe. The last command runs
+the solver.
 
 ```powershell
-Set-Location "$env:LOCALAPPDATA\VD-Solver\v0.1.0-beta.5" # for the PowerShell installation
+./vd.cmd preflight
 ./vd.cmd capture-probe --seconds 10
 ./vd.cmd dry-run --seconds 10 --no-recording
 ./vd.cmd run
 ```
-
-Live testing at 1366×768 confirmed prompt detection and the beta 3 Space input.
-Beta 5 discards stale DXGI frames before image processing and keeps a due
-prediction when a valid frame from the same source arrives just after the
-timer wakes. Its Windows performance report also separates capture stages and
-shows CPU time spent in the detector. In-game accuracy on beta 5 remains unmeasured.
 
 The worker uses [DXGI Desktop Duplication](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/desktop-duplication-api)
 with the standard Roblox launcher or Bloxstrap and supports the ordinary Direct3D 11
@@ -140,10 +120,10 @@ tolerance scales with observed frame cadence, while real jumps still reset the
 fit. Performance output includes separate active-check CV, processing and source
 age summaries so idle frames cannot hide the cost of fast checks.
 
-Before an imminent timer, the runtime reserves the recent CV p95 plus 1 ms
-(4–12 ms on Linux, 4–60 ms on Windows) and checks a busy writer without another
-pixel read or CV pass. The final millisecond uses bounded polling. Source and
-mouse validation still apply. Freeze diagnostics stop at prompt disappearance;
+Before an imminent timer, the Linux runtime reserves the recent CV p95 plus
+1 ms, bounded to 4–12 ms. On Windows, a detector call can run independently
+while the runtime waits for a scheduled press. Source and mouse validation
+still apply. Freeze diagnostics stop at prompt disappearance;
 red scenery cannot overwrite a same-ring landing. An atomic incomplete manifest
 is saved at session start, so a forced exit retains configuration and provenance.
 

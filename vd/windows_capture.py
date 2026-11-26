@@ -19,10 +19,11 @@ from vd.capture import DEFAULT_ROI, Frame
 
 
 _FRAME_HEADER = struct.Struct('<4sIQQQQIIIIiiii')
+_FRAME_TIMING = struct.Struct('<QI4x')
 _MAX_ROI_BYTES = 64 * 1024 * 1024
 _TIMESTAMP_KIND = 'dxgi-desktop-present-qpc'
 _PER_MONITOR_AWARE_V2 = -4
-_DISPATCH_POLL_SECONDS = .001
+_DISPATCH_WAIT_GUARD = .017
 
 
 def helper_path():
@@ -190,7 +191,7 @@ class WindowsCapture:
                 (magic, version, sequence, present_ns, copy_ns, monitor,
                  width, height, roi_width, roi_height, roi_x, roi_y,
                  source_x, source_y) = _FRAME_HEADER.unpack(header)
-                if magic != b'VDD1' or version != 1:
+                if magic != b'VDD1' or version not in (1, 2):
                     raise ValueError('Unsupported Windows capture frame protocol')
                 size = roi_width * roi_height * 4
                 if (monitor == 0 or roi_x < 0 or roi_y < 0 or not 0 < size <= _MAX_ROI_BYTES
@@ -198,6 +199,13 @@ class WindowsCapture:
                     raise ValueError('Invalid Windows capture desktop or ROI geometry')
                 if sequence <= previous_sequence or not previous_present_ns < present_ns <= copy_ns:
                     raise ValueError('Invalid Windows capture frame sequence or timestamp')
+
+                acquired_ns = accumulated_frames = None
+                if version == 2:
+                    timing = _read_exact(self.proc.stdout, _FRAME_TIMING.size)
+                    acquired_ns, accumulated_frames = _FRAME_TIMING.unpack(timing)
+                    if not present_ns <= acquired_ns <= copy_ns:
+                        raise ValueError('Invalid Windows capture acquisition timestamp')
 
                 region = _DesktopRegion(monitor, (width, height), (source_x, source_y),
                                         (roi_x, roi_y, roi_width, roi_height))
@@ -230,6 +238,8 @@ class WindowsCapture:
                         source_size=region.source_size,
                         source_generation=1, copy_completed_time=copy_ns / 1e9,
                         published_time=published, source_epoch=self._source_epoch,
+                        source_acquired_time=acquired_ns / 1e9 if acquired_ns is not None else None,
+                        source_accumulated_frames=accumulated_frames,
                     )
                     self._pending_frame = False
                     self.cv.notify_all()
@@ -256,7 +266,7 @@ class WindowsCapture:
         dispatch_deadline = self._dispatch_deadline
         if dispatch_deadline is not None and dispatch_deadline <= deadline:
             deadline = dispatch_deadline
-            poll_window = _DISPATCH_POLL_SECONDS
+            poll_window = _DISPATCH_WAIT_GUARD
         while True:
             with self.cv:
                 if self.stopping:
@@ -270,8 +280,10 @@ class WindowsCapture:
                     return None
                 if remaining > poll_window:
                     self.cv.wait(remaining - poll_window)
-            # Release the condition between checks so the reader can publish.
-            # Only the final millisecond of a scheduled dispatch uses polling.
+                    continue
+            # Condition.wait uses a millisecond Windows lock wait. Use CPython's
+            # high-resolution sleep close to a deadline, outside the capture lock.
+            time.sleep(min(.001, max(0.0, remaining - .0005)))
 
     def prediction_current(self, frame):
         with self.cv:

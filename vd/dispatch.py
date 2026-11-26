@@ -64,6 +64,10 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
             claim_at=clock()
             if same_source_timer and claim_at>min(plan.valid_until,plan.latest_press_at):
                 return None
+            if claim_at-frame.media_time>engine.planner.max_age:
+                engine.planner.invalidate('STALE_FRAME')
+                engine.reason='STALE_FRAME'
+                return None
             plan=engine.poll(claim_at,held=held,capture_alive=True)
             if plan is None:
                 return None
@@ -82,7 +86,7 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
                 if same_source_timer and engine.last_timestamp is not None:
                     frame_at=engine.last_timestamp
                 engine.emit('KEYDOWN',keydown.syn_completed_at,
-                    requested_at=keydown.requested_at,plan=asdict(plan),
+                    claimed_at=claim_at,requested_at=keydown.requested_at,plan=asdict(plan),
                     frame_at=frame_at,
                     prefire_motion=asdict(engine.motion.estimate) if engine.motion.estimate else None,
                     motion_diagnostics=dict(

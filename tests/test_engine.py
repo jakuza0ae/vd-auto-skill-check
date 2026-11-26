@@ -7,6 +7,18 @@ def measurement(at, *, prompt=.95, angle=70.0, great=Arc(96, 10)):
                        (Needle(angle, 75, .8, 30, 2),), 'OK')
 
 
+def test_confirming_geometry_keeps_first_unambiguous_needle_for_low_cadence():
+    engine = Engine(lead_seconds=0, seed_confirmed_motion=True)
+    engine.observe(measurement(1.0, angle=60), now=1.010)
+    assert engine.planner.current is None
+    engine.observe(measurement(1.04, angle=92), now=1.045)
+
+    plan = engine.planner.current
+    assert plan is not None and plan.timing_mode == 'PREDICTED'
+    assert plan.target_phase == 101
+    assert abs(plan.press_at - 1.05125) < 1e-8
+
+
 def test_background_arcs_and_needle_do_not_start_a_check_without_prompt():
     engine = Engine()
     engine.observe(measurement(1.0, prompt=.67), now=1.0)

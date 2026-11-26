@@ -19,8 +19,8 @@ unverified and are not needed to inspect this solver. Nothing was installed.
   alternative exposed by `start-solver.sh`.
 - On Windows `run.py` starts `vd/windows_capture.py` -> `native/windows_capture.cpp`.
   DXGI duplicates the chosen monitor, copies only the scaled center ROI and
-  publishes it over a pipe with separate desktop present and copy timestamps
-  from QPC. The default is the primary monitor with a 60 FPS capture limit.
+  publishes it over a pipe with separate desktop present, acquisition and copy
+  timestamps from QPC, plus the count of accumulated DXGI frames. The default is the primary monitor with a 60 FPS capture limit.
   `vd/windows_input.py` uses Win32 mouse state and Space output. Dispatch also
   verifies that the foreground Roblox window contains the captured region and
   that focus and the button still match just before keydown.
@@ -44,11 +44,12 @@ unverified and are not needed to inspect this solver. Nothing was installed.
   bounded GREAT attempt. `vd/dispatch.py` performs the final capture freshness,
   source identity and LMB checks before `vd/input.py` (Linux) or
   `vd/windows_input.py` sends Space.
-- The runtime reserves a measured CV-sized slice before a pending deadline
-  (4–12 ms on Linux, 4–60 ms on Windows). An existing DXGI prediction can use
-  a newer complete frame from the same source to verify capture health while
-  retaining the original plan. Busy publication gets bounded status retries.
-  The runtime still owns the only input dispatch path.
+- The Linux runtime reserves a 4–12 ms slice before a pending deadline. On
+  Windows, the runtime waits for a scheduled press independently of a single
+  in-flight CV call. The runtime owns engine state and input. A newer complete
+  DXGI frame of the same source can validate capture health within the
+  prediction's validity window. Windows can use two geometry-confirmed frames
+  with unambiguous needles to establish initial motion.
 
 ## Evidence, persistence and decisions
 

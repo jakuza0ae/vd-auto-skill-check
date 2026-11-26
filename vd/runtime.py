@@ -106,16 +106,15 @@ def _wait_for_dxgi_measurement(future, engine, capture, frame, *, mouse, output,
     dispatched = False
     while True:
         now = time.monotonic()
-        if now > stop or engine.planner.current is not plan:
+        if future.done() or now > stop or engine.planner.current is not plan:
             break
         remaining = plan.press_at - now
         if remaining <= 0:
             dispatched = dispatch(engine, capture, frame.sequence, mouse=mouse, output=output,
-                                  clock=time.monotonic, same_source_as=frame) is not None
+                                  clock=time.monotonic, same_source_as=frame,
+                                  predicted_only=True) is not None
             if engine.reason != 'CAPTURE_WRITING':
                 break
-        elif future.done():
-            break
         # CPython uses a high-resolution Windows timer for time.sleep().
         # Yield to the reader and CV threads close to the deadline.
         time.sleep(min(.001, max(0, remaining - .0005)))

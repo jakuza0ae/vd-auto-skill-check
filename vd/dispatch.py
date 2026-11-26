@@ -12,7 +12,7 @@ from .input_state import InputDisarmed
 
 
 def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.monotonic,
-             same_source_as=None):
+             same_source_as=None, predicted_only=False):
     if output is not None and mouse is None:
         raise ValueError('Physical input requires a mouse monitor')
     with capture.cv:
@@ -62,7 +62,8 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
             if not prediction_ready():
                 return None
             claim_at=clock()
-            if same_source_timer and claim_at>min(plan.valid_until,plan.latest_press_at):
+            if (same_source_timer or predicted_only) and (plan is None or
+                    plan.timing_mode!='PREDICTED' or claim_at>min(plan.valid_until,plan.latest_press_at)):
                 return None
             if claim_at-frame.media_time>engine.planner.max_age:
                 engine.planner.invalidate('STALE_FRAME')
@@ -83,7 +84,7 @@ def dispatch(engine, capture, sequence, *, mouse=None, output=None, clock=time.m
                     engine.cancel('INPUT_FAILED',clock())
                     raise
                 frame_at=frame.media_time
-                if same_source_timer and engine.last_timestamp is not None:
+                if same_source_as is not None and engine.last_timestamp is not None:
                     frame_at=engine.last_timestamp
                 engine.emit('KEYDOWN',keydown.syn_completed_at,
                     claimed_at=claim_at,requested_at=keydown.requested_at,plan=asdict(plan),
